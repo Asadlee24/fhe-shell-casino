@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useShellSound } from "@/lib/useShellSound";
 import { useSearchParams } from "next/navigation";
@@ -83,7 +82,7 @@ export function InviteTable() {
   const [fastContract, setFastContract] = useState("");
   const [failedBatchClaim, setFailedBatchClaim] = useState("");
   const fast = !!INVITE_ADDRESS && same(fastContract, INVITE_ADDRESS);
-  const { account, provider: walletProvider } = useWallet();
+  const { account, connect, provider: walletProvider } = useWallet();
   const [inviteId, setInviteId] = useState(invited);
   const [invite, setInvite] = useState<InviteView | null>(null);
   const [status, setStatus] = useState("");
@@ -376,11 +375,18 @@ export function InviteTable() {
   async function settlePayment(slot: number, pendingHandle?: `0x${string}`) {
     setBusy(true);
     setError("");
+    setStatus(pendingHandle && pendingHandle !== ZeroHash ? "Checking the transfer with Zama…" : "Sending payout…");
     try {
       const box = new Contract(INVITE_ADDRESS, inviteAbi, await signer());
       if (pendingHandle && pendingHandle !== ZeroHash) {
         const proof = await publicDecrypt.mutateAsync([pendingHandle]);
+        setStatus("Confirm the transfer proof in your wallet…");
         await (await box.confirmTransfer(inviteId, slot, proof.abiEncodedClearValues, proof.decryptionProof)).wait();
+        if (open && proof.clearValues[pendingHandle] === 0n) {
+          setStatus("0 cUSDT transferred. Top up the staking wallet, then try again.");
+          await refresh();
+          return;
+        }
       } else {
         await (await box.paySeat(inviteId, slot)).wait();
       }
@@ -414,7 +420,6 @@ export function InviteTable() {
   const seated = mySlot >= 0;
   const myHands = mySlot === 0 ? (invite?.hostHands ?? 0) : mySlot === 1 ? (invite?.guestHands ?? 0) : 0;
   const myCommitted = mySlot === 0 ? !!invite?.hostCommitted : mySlot === 1 ? !!invite?.guestCommitted : false;
-  const otherCommitted = mySlot === 0 ? !!invite?.guestCommitted : mySlot === 1 ? !!invite?.hostCommitted : false;
   const open = invite?.phase === 1;
   const expired = open && invite.deadline * 1000 <= now;
   const waiting = open && !expired && invite.player1 === "0x0000000000000000000000000000000000000000";
@@ -446,196 +451,250 @@ export function InviteTable() {
     if (previous?.id === id && !previous.paid && invite.claimed && same(account, invite.winner)) playSound("win");
   }, [account, invite, inviteId, legacy, INVITE_ADDRESS, playSound]);
 
+  const pendingStake = open && invite.payments.some((payment) => payment.pendingHandle !== ZeroHash);
+  const settlementPending =
+    !!invite && !open && !sealed && !invite.claimed && invite.payments.some((payment) => payment.due > 0n);
+  const guidance = !INVITE_ADDRESS
+    ? "This invite points to an unsupported contract."
+    : !account
+      ? "Connect your Sepolia wallet to play."
+      : !invite
+        ? "Open a table to play or share it with a friend."
+        : pendingStake
+          ? "A stake was submitted. Confirm its transfer before it counts."
+          : sealed
+            ? "Both stakes are confirmed. Verify the result to settle the match."
+            : settlementPending
+              ? "Complete the payout below to settle this table."
+              : expired
+                ? "This invite has expired."
+                : myCommitted
+                  ? "Waiting for the other player to confirm their stake."
+                  : canCommit
+                    ? "Your three hands are complete. Confirm a 1 test-token stake to lock in your score."
+                    : waiting && !seated
+                      ? "An open seat is available at this table."
+                      : "Pick a shell in each of three hands. Your score stays encrypted.";
+
   return (
     <main className="table-room">
-      <header className="marquee">
-        <h1>Shell Table</h1>
-        <p>Two players. Three picks each.</p>
-      </header>
-      <div className="felt-wrap">
-        <div className="felt">
-          <ShellScene picking={picking} revealed={ballKnown ? myBall : -1} />
-          <div className="table-rail">
-            <span>{invite ? `Table ${inviteId}` : "Sepolia testnet"}</span>
-            <button className="sound-toggle" type="button" aria-pressed={!muted} onClick={toggleSound}>
-              Sound {muted ? "off" : "on"}
-            </button>
+      <div className="table-desk">
+        <section className="table-stage" aria-label="Shell Table game">
+          <header className="marquee">
+            <span className="table-network">
+              <span aria-hidden="true" />
+              Sepolia testnet
+            </span>
+            <h1>Shell Table</h1>
+            <p>Two players. Three picks. The higher encrypted score wins.</p>
+          </header>
+          <div className="felt-wrap">
+            <div className="felt">
+              <ShellScene picking={picking} revealed={ballKnown ? myBall : -1} />
+              <div className="table-rail">
+                <span>{invite ? `Table ${inviteId}` : "Sepolia testnet"}</span>
+                <button className="sound-toggle" type="button" aria-pressed={!muted} onClick={toggleSound}>
+                  Sound {muted ? "off" : "on"}
+                </button>
+              </div>
+              <div className={`cups ${picking ? "picking" : ""}`}>
+                {[0, 1, 2].map((cup) => (
+                  <button
+                    key={cup}
+                    type="button"
+                    className={`cup ${ballKnown && myBall === cup ? "lift" : ""} ${chosen === cup ? "chosen" : ""}`}
+                    aria-label={`Cup ${cup + 1}`}
+                    disabled={(!canPlay && !canStartFast) || !picking || busy}
+                    onClick={() => void playCup(cup)}
+                  >
+                    <span className="cup-object" aria-hidden="true" />
+                    <span className={`ball ${ballKnown && myBall === cup ? "show" : ""}`} aria-hidden="true" />
+                    <span className="cup-index" aria-hidden="true">
+                      {cup + 1}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
-          <div className={`cups ${picking ? "picking" : ""}`}>
-            {[0, 1, 2].map((cup) => (
-              <button
-                key={cup}
-                type="button"
-                className={`cup ${ballKnown && myBall === cup ? "lift" : ""} ${chosen === cup ? "chosen" : ""}`}
-                aria-label={`Cup ${cup + 1}`}
-                disabled={(!canPlay && !canStartFast) || !picking || busy}
-                onClick={() => void playCup(cup)}
-              >
-                <span className="cup-object" aria-hidden="true" />
-                <span className={`ball ${ballKnown && myBall === cup ? "show" : ""}`} aria-hidden="true" />
-                <span className="cup-index" aria-hidden="true">
-                  {cup + 1}
-                </span>
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-      <p className={`table-msg ${error ? "bad" : "info"}`}>
-        {error ||
-          readError ||
-          status ||
-          (ballKnown
-            ? myBall === 3
-              ? "Draw void. Both stakes are returned at settlement."
-              : chosen !== null && myBall === chosen
-                ? "The ball was under the cup you picked. Your score stays encrypted."
-                : chosen !== null
-                  ? "The ball was under a different cup. Your score stays encrypted."
-                  : "Your cup is revealed. Your score stays encrypted."
-            : "Play your three hands free. The other player does not have to be here.")}
-      </p>
-      <div className="table-controls">
-        {canStartFast && !picking && (
-          <button type="button" disabled={busy} onClick={startRound}>
-            {invite ? "Join and play hand 1" : "Open and play hand 1"}
-          </button>
-        )}
-        {!invite && !(canStartFast && picking) && (
-          <button
-            type="button"
-            className={fast ? "ghost" : undefined}
-            disabled={!account || !INVITE_ADDRESS || busy}
-            onClick={() => void createTable()}
-          >
-            {fast ? "Open without playing" : "Open a table"}
-          </button>
-        )}
-        {!legacy && waiting && !seated && !fast && (
-          <button type="button" disabled={!account || busy} onClick={() => void joinTable()}>
-            Take the open seat
-          </button>
-        )}
-        {canPlay && !picking && (
-          <button type="button" disabled={busy} onClick={startRound}>
-            Play hand {myHands + 1} of {HANDS}
-          </button>
-        )}
-        {canCommit && invite?.paymentKind !== 2 && (
-          <button type="button" disabled={!account || busy} onClick={() => void commitConfidential()}>
-            Stake cUSDT test token
-          </button>
-        )}
-        {canCommit && invite?.paymentKind !== 2 && (
-          <button
-            type="button"
-            className="ghost"
-            disabled={busy}
-            onClick={() => {
-              setBusy(true);
-              void payConfidential()
-                .then(() => setStatus("Test tokens ready."))
-                .catch((err) => setError(explainChainError(err)))
-                .finally(() => setBusy(false));
-            }}
-          >
-            Get cUSDT test tokens
-          </button>
-        )}
-        {myCommitted && open && !otherCommitted && (
-          <span className="fast-badge">Score committed. The other player commits to resolve.</span>
-        )}
-        {sealed && (
-          <button type="button" disabled={!account || busy} onClick={() => void claim(fast)}>
-            {legacy ? "Submit original prize claim" : fast ? "Verify result and send payout" : "Verify match result"}
-          </button>
-        )}
-        {sealed && fast && failedBatchClaim === `${INVITE_ADDRESS}:${inviteId}` && (
-          <button type="button" className="ghost" disabled={!account || busy} onClick={() => void claim(false)}>
-            Verify result separately
-          </button>
-        )}
-        {expired && invite.payments.every((payment) => payment.pendingHandle === ZeroHash) && (
-          <button type="button" disabled={!account || busy} onClick={() => void refund()}>
-            Refund the committed stake
-          </button>
-        )}
-        {canCommit && invite?.paymentKind !== 1 && (
-          <button type="button" className="ghost" disabled={!account || busy} onClick={() => void commitClear()}>
-            Stake clear test token
-          </button>
-        )}
-      </div>
-      {invite && !legacy && (
-        <div className="table-controls">
-          {invite.payments.map((payment, slot) => {
-            const pending = payment.pendingHandle !== ZeroHash;
-            if (open && !pending) return null;
-            if (!open && payment.due === 0n) return null;
-            return (
-              <button
-                key={slot}
-                type="button"
-                disabled={!account || busy}
-                onClick={() => void settlePayment(slot, payment.pendingHandle)}
-              >
-                {pending ? "Confirm" : "Send"} seat {slot + 1} {open ? "stake" : "payout"}
-              </button>
-            );
-          })}
-        </div>
-      )}
-      {!INVITE_ADDRESS && <p className="seat-line">Set the updated Sepolia contract address to open new tables.</p>}
-      {link && invite && (
-        <div className="invite-link">
-          <span>Invitation link</span>
-          <code>{link}</code>
-          <button
-            type="button"
-            className="ghost"
-            onClick={() => {
-              void navigator.clipboard.writeText(link).then(
-                () => setCopied(true),
-                () => setError("Copy the invitation URL from your address bar."),
+        </section>
+        <aside className="table-console" aria-label="Table controls">
+          <header className="console-heading">
+            <h2>{invite ? `Table ${inviteId}` : "Play a match"}</h2>
+            {invite && (
+              <a href={addressUrl(INVITE_ADDRESS)} target="_blank" rel="noreferrer">
+                Contract ↗
+              </a>
+            )}
+          </header>
+          <div className="table-seats">
+            {SLOTS.map((slot) => {
+              const player = slot === 0 ? invite?.player0 : invite?.player1;
+              const hands = (slot === 0 ? invite?.hostHands : invite?.guestHands) ?? 0;
+              const committed = slot === 0 ? invite?.hostCommitted : invite?.guestCommitted;
+              return (
+                <div className="table-seat" key={slot}>
+                  <div className="seat-name">
+                    <strong>{slot === 0 ? "Host" : "Guest"}</strong>
+                    <span>
+                      {player ? short(player) || "Open seat" : "Open seat"}
+                      {mySlot === slot ? " · You" : ""}
+                    </span>
+                  </div>
+                  <div
+                    className="seat-progress"
+                    aria-label={`${hands} of ${HANDS} hands${committed ? ", stake confirmed" : ""}`}
+                  >
+                    {[1, 2, 3].map((hand) => (
+                      <i key={hand} data-played={hand <= hands} />
+                    ))}
+                    <small>{committed ? "Staked" : `${hands}/${HANDS}`}</small>
+                  </div>
+                </div>
               );
-            }}
-          >
-            {copied ? "Copied" : "Copy link"}
-          </button>
-          {open && <p>{timeLeft(invite.deadline, now)}</p>}
-        </div>
-      )}
-      {invite?.claimed && (
-        <p className="table-msg good">
-          {legacy
-            ? "Original claim recorded. Check the transfer on Sepolia."
-            : invite.winner === ZeroAddress
-              ? "Any funded stakes were returned."
-              : same(account, invite.winner)
-                ? "You won. The prize was paid."
-                : `Prize paid to ${short(invite.winner)}.`}
-        </p>
-      )}
-      {invite && (
-        <p className="seat-line">
-          Seat 1 {short(invite.player0) || "open"}
-          {" · "}
-          Seat 2 {short(invite.player1) || "open"}
-          {invite.host && (
-            <>
-              {" · "}
-              <a href={addressUrl(INVITE_ADDRESS)}>Contract</a>
-            </>
+            })}
+          </div>
+          <p role="status" className={`table-msg ${error ? "bad" : "info"}`}>
+            {error ||
+              readError ||
+              status ||
+              (ballKnown && !pendingStake && !sealed && !settlementPending && !invite?.claimed
+                ? myBall === 3
+                  ? "Draw void. Both stakes are returned at settlement."
+                  : myBall === chosen
+                    ? "You found the ball. Your score stays encrypted."
+                    : "The ball was under another shell."
+                : guidance)}
+          </p>
+          <div className="table-controls">
+            {!account && (
+              <button type="button" onClick={connect}>
+                Connect wallet
+              </button>
+            )}
+            {canStartFast && !picking && (
+              <button type="button" disabled={busy} onClick={startRound}>
+                {invite ? "Join and play hand 1" : "Open and play hand 1"}
+              </button>
+            )}
+            {!!account && !invite && !(canStartFast && picking) && (
+              <button
+                type="button"
+                className={fast ? "ghost" : undefined}
+                disabled={!account || !INVITE_ADDRESS || busy}
+                onClick={() => void createTable()}
+              >
+                {fast ? "Open without playing" : "Open a table"}
+              </button>
+            )}
+            {!legacy && waiting && !seated && !fast && (
+              <button type="button" disabled={!account || busy} onClick={() => void joinTable()}>
+                Take the open seat
+              </button>
+            )}
+            {canPlay && !picking && (
+              <button type="button" disabled={busy} onClick={startRound}>
+                Play hand {myHands + 1} of {HANDS}
+              </button>
+            )}
+            {canCommit && invite?.paymentKind !== 2 && (
+              <button type="button" disabled={!account || busy} onClick={() => void commitConfidential()}>
+                Stake cUSDT test token
+              </button>
+            )}
+            {canCommit && invite?.paymentKind !== 2 && (
+              <button
+                type="button"
+                className="ghost"
+                disabled={busy}
+                onClick={() => {
+                  setBusy(true);
+                  void payConfidential()
+                    .then(() => setStatus("Test tokens ready."))
+                    .catch((err) => setError(explainChainError(err)))
+                    .finally(() => setBusy(false));
+                }}
+              >
+                Get cUSDT test tokens
+              </button>
+            )}
+            {sealed && (
+              <button type="button" disabled={!account || busy} onClick={() => void claim(fast)}>
+                {legacy
+                  ? "Submit original prize claim"
+                  : fast
+                    ? "Verify result and send payout"
+                    : "Verify match result"}
+              </button>
+            )}
+            {sealed && fast && failedBatchClaim === `${INVITE_ADDRESS}:${inviteId}` && (
+              <button type="button" className="ghost" disabled={!account || busy} onClick={() => void claim(false)}>
+                Verify result separately
+              </button>
+            )}
+            {expired && invite.payments.every((payment) => payment.pendingHandle === ZeroHash) && (
+              <button type="button" disabled={!account || busy} onClick={() => void refund()}>
+                Refund the committed stake
+              </button>
+            )}
+            {canCommit && invite?.paymentKind !== 1 && (
+              <button type="button" className="ghost" disabled={!account || busy} onClick={() => void commitClear()}>
+                Stake clear test token
+              </button>
+            )}
+          </div>
+          {invite && !legacy && (
+            <div className="table-controls">
+              {invite.payments.map((payment, slot) => {
+                const pending = payment.pendingHandle !== ZeroHash;
+                if (open && !pending) return null;
+                if (!open && payment.due === 0n) return null;
+                return (
+                  <button
+                    key={slot}
+                    type="button"
+                    disabled={!account || busy}
+                    onClick={() => void settlePayment(slot, payment.pendingHandle)}
+                  >
+                    {pending ? "Confirm" : "Send"} seat {slot + 1} {open ? "stake" : "payout"}
+                  </button>
+                );
+              })}
+            </div>
           )}
-        </p>
-      )}
-      {!INVITE_ADDRESS && <p className="table-msg bad">The invite contract is not on Sepolia yet.</p>}
-      {!account && (
-        <p className="table-msg info">Connect a wallet on Sepolia. The other player can open the link later.</p>
-      )}
-      <p className="seat-line">
-        <Link href="/showdown">2–5 player showdown</Link>
-      </p>
+          {link && invite && (
+            <div className="invite-link">
+              <div>
+                <strong>Invite a player</strong>
+                {open && <p>{timeLeft(invite.deadline, now)}</p>}
+              </div>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => {
+                  void navigator.clipboard.writeText(link).then(
+                    () => setCopied(true),
+                    () => setError("Copy the invitation URL from your address bar."),
+                  );
+                }}
+              >
+                {copied ? "Copied" : "Copy invite"}
+              </button>
+            </div>
+          )}
+          {invite?.claimed && (
+            <p className="table-msg good">
+              {legacy
+                ? "Original claim recorded. Check the transfer on Sepolia."
+                : invite.winner === ZeroAddress
+                  ? "Any funded stakes were returned."
+                  : same(account, invite.winner)
+                    ? "You won. The prize was paid."
+                    : `Prize paid to ${short(invite.winner)}.`}
+            </p>
+          )}
+        </aside>
+      </div>
     </main>
   );
 }
