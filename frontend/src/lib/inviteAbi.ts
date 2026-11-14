@@ -1,4 +1,8 @@
 export const inviteAbi = [
+  "function FAST_FLOW_VERSION() view returns (uint8)",
+  "function createAndPlay(uint8 cup) returns (uint256)",
+  "function joinAndPlay(uint256 inviteId, uint8 cup)",
+  "function claimAndPay(uint256 inviteId, bytes cleartexts, bytes decryptionProof)",
   "function getInvite(uint256 inviteId) view returns (address host, uint64 deadline, uint8 phase, uint8 paymentKind, uint256 pot, address winner, bool claimed, bytes32 winnerHandle)",
   "function getSeats(uint256 inviteId) view returns (address player0, address player1)",
   "function getHands(uint256 inviteId) view returns (uint8 hostHands, uint8 guestHands)",

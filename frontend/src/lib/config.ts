@@ -27,7 +27,8 @@ export const BUY_TX = deployment.buyTx;
 export const SHOWDOWN_DEPLOY_TX = deployment.showdownDeployTx;
 export const SHOWDOWN_ROUND_TX = deployment.showdownRoundTx;
 export const SHOWDOWN_RESOLVE_TX = deployment.showdownResolveTx;
-export const LEGACY_INVITE_ADDRESS = deployment.invite;
+export const LEGACY_INVITE_ADDRESS = "0xBa72092d9078E82912864ebB2a6fCa505f95AFB3";
+export const PREVIOUS_INVITE_ADDRESS = deployment.invite;
 export const INVITE_ADDRESS = (process.env.NEXT_PUBLIC_INVITE_ADDRESS || deployment.invite) as `0x${string}`;
 
 export const BOX_PRICE = 1_000_000n;

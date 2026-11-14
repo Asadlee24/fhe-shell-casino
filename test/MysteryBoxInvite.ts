@@ -110,10 +110,7 @@ describe("MysteryBoxInvite", function () {
     const revealed = await fhevm.publicDecrypt([sealed.winnerHandle]);
     expect(revealed.clearValues[sealed.winnerHandle as `0x${string}`]).to.eq(expected);
 
-    await (await invite.claim(inviteId, revealed.abiEncodedClearValues, revealed.decryptionProof)).wait();
-    for (const slot of [0, 1]) {
-      if ((await invite.getPayment(inviteId, slot)).due > 0n) await (await invite.paySeat(inviteId, slot)).wait();
-    }
+    await (await invite.claimAndPay(inviteId, revealed.abiEncodedClearValues, revealed.decryptionProof)).wait();
     const paid = await invite.getInvite(inviteId);
     expect(paid.winner).to.eq(expected);
     expect(paid.claimed).to.eq(true);
@@ -124,6 +121,27 @@ describe("MysteryBoxInvite", function () {
     expect(await erc.balanceOf(bob.address)).to.eq(
       expected === ethers.ZeroAddress ? STAKE : expected === bob.address ? STAKE * 2n : 0n,
     );
+  });
+
+  it("combines seating and the first hand without consuming a seat on a failed pick", async function () {
+    if (!fhevm.isMock) this.skip();
+    ({ invite, address } = await deployFixture(true));
+
+    await expect(invite.connect(alice).createAndPlay(3)).to.be.revertedWithCustomError(invite, "BadCup");
+    expect(await invite.inviteCount()).to.eq(0n);
+
+    await (await invite.connect(alice).createAndPlay(0)).wait();
+    const id = await invite.inviteCount();
+    await expect(invite.connect(bob).joinAndPlay(id, 3)).to.be.revertedWithCustomError(invite, "BadCup");
+    expect((await invite.getSeats(id)).player1).to.eq(ethers.ZeroAddress);
+
+    await (await invite.connect(bob).joinAndPlay(id, 1)).wait();
+    expect(await invite.getSeats(id)).to.deep.eq([alice.address, bob.address]);
+    expect(await invite.getHands(id)).to.deep.eq([1n, 1n]);
+    for (const [slot, player] of [alice, bob].entries()) {
+      const ball = await invite.getBallHandle(id, slot);
+      expect(await fhevm.userDecryptEuint(FhevmType.euint32, ball, address, player)).to.be.within(0n, 3n);
+    }
   });
 
   it("rejects score decryption when debug access is off", async function () {
@@ -252,15 +270,16 @@ describe("MysteryBoxInvite", function () {
     }
     const { winnerHandle } = await invite.getInvite(id);
     const result = await fhevm.publicDecrypt([winnerHandle]);
-    await (await invite.claim(id, result.abiEncodedClearValues, result.decryptionProof)).wait();
+    await (await cusdt.setPayoutLimit(0)).wait();
+    await (await invite.claimAndPay(id, result.abiEncodedClearValues, result.decryptionProof)).wait();
     await expect(invite.claim(id, result.abiEncodedClearValues, result.decryptionProof)).to.be.revertedWithCustomError(
       invite,
       "BadPhase",
     );
-    await (await cusdt.setPayoutLimit(0)).wait();
     const winner = (await invite.getInvite(id)).winner;
     const recipients = winner === ethers.ZeroAddress ? [0, 1] : [winner === alice.address ? 0 : 1];
-    for (const slot of recipients) await (await invite.paySeat(id, slot)).wait();
+    for (const slot of recipients) expect((await invite.getPayment(id, slot)).pendingHandle).not.to.eq(ethers.ZeroHash);
+    expect((await invite.getInvite(id)).claimed).to.eq(false);
     for (const slot of recipients) await confirm(slot);
     expect((await invite.getInvite(id)).claimed).to.eq(false);
     expect((await invite.getInvite(id)).pot).to.eq(2n * STAKE);

@@ -20,6 +20,7 @@ interface IClearStakeToken {
 ///         then pays $1 to commit the score. The higher encrypted score wins $2. Scores are not publicly decryptable.
 /// @dev `block.timestamp` is only the invite window. The ball and the score come from `FHE.randEuint32`.
 contract MysteryBoxInvite is ZamaEthereumConfig {
+    uint8 public constant FAST_FLOW_VERSION = 1;
     uint256 public constant STAKE = 1_000_000;
     uint256 public constant PRIZE = 2_000_000;
     uint256 public constant OPEN_WINDOW = 48 hours;
@@ -169,8 +170,24 @@ contract MysteryBoxInvite is ZamaEthereumConfig {
         inviteId = _open(msg.sender);
     }
 
+    /// @notice Open a table and play its first shell in one transaction.
+    function createAndPlay(uint8 cup) external returns (uint256 inviteId) {
+        inviteId = _open(msg.sender);
+        _play(inviteId, cup);
+    }
+
     /// @notice Taking the open seat is free. The $1 stake is paid when the score is committed.
     function joinInvite(uint256 inviteId) external {
+        _join(inviteId);
+    }
+
+    /// @notice Take the open seat and play its first shell in one transaction.
+    function joinAndPlay(uint256 inviteId, uint8 cup) external {
+        _join(inviteId);
+        _play(inviteId, cup);
+    }
+
+    function _join(uint256 inviteId) private {
         Invite storage invite = _invites[inviteId];
         if (invite.phase != Phase.Open) revert BadPhase();
         if (block.timestamp > invite.deadline) revert InviteExpired();
@@ -182,6 +199,10 @@ contract MysteryBoxInvite is ZamaEthereumConfig {
 
     /// @notice Play one of three shell hands for free. The score accumulates on ciphertext.
     function play(uint256 inviteId, uint8 cup) external {
+        _play(inviteId, cup);
+    }
+
+    function _play(uint256 inviteId, uint8 cup) private {
         if (cup > 2) revert BadCup();
         Invite storage invite = _invites[inviteId];
         if (invite.phase != Phase.Open) revert BadPhase();
@@ -250,6 +271,18 @@ contract MysteryBoxInvite is ZamaEthereumConfig {
     }
 
     function claim(uint256 id, bytes calldata cleartexts, bytes calldata proof) external locked {
+        _claim(id, cleartexts, proof);
+    }
+
+    /// @notice Verify the winner proof and send all due payouts in one transaction.
+    function claimAndPay(uint256 id, bytes calldata cleartexts, bytes calldata proof) external locked {
+        _claim(id, cleartexts, proof);
+        for (uint8 slot = 0; slot < 2; ++slot) {
+            if (_payments[id][slot].due != 0) _paySeat(id, slot);
+        }
+    }
+
+    function _claim(uint256 id, bytes calldata cleartexts, bytes calldata proof) private {
         Invite storage invite = _invites[id];
         if (invite.phase != Phase.Sealed) revert BadPhase();
         _verify(eaddress.unwrap(invite.encryptedWinner), cleartexts, proof);
@@ -266,6 +299,10 @@ contract MysteryBoxInvite is ZamaEthereumConfig {
     }
 
     function paySeat(uint256 id, uint8 slot) external locked {
+        _paySeat(id, slot);
+    }
+
+    function _paySeat(uint256 id, uint8 slot) private {
         Invite storage invite = _invites[id];
         if (invite.phase != Phase.Settling && invite.phase != Phase.Refunded) revert BadPhase();
         Payment storage payment = _payments[id][slot];

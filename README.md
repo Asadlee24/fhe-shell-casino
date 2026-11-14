@@ -85,9 +85,14 @@ origin allowlist, include the frontend's hosted origin.
 The winner receives both stakes. A tie returns each stake. If the encrypted draw hits the one excluded 32-bit value, the
 match is void and both stakes are returned. Expired incomplete tables can refund amounts actually received.
 
-Set `NEXT_PUBLIC_INVITE_ADDRESS` to the **updated** contract in `frontend/.env.local`, then rebuild the frontend. The
-existing Sepolia address below belongs to the original contract. Old invite URLs can still open their original table. A
-complete two-wallet run on the updated Sepolia deployment is required before submission.
+On a contract compiled with `FAST_FLOW_VERSION`, use **Open and play hand 1** and **Join and play hand 1** to combine
+each seat setup with its first pick. **Verify result and send payout** also combines winner proof verification and
+payout submission. On a standard confidential-token winner path, that saves three transactions per match. The final
+receipt proof is still required before the app displays **Paid**.
+
+After deploying the new contract on Sepolia, set `NEXT_PUBLIC_INVITE_ADDRESS` to the new address and rebuild the
+frontend. The existing deployment below remains the default until the setting is updated. Links containing its contract
+address continue to open their original tables.
 
 ## Contract addresses (Sepolia)
 
