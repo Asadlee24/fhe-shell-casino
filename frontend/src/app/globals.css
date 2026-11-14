@@ -1007,3 +1007,42 @@ button.cup .ball.show {
     transition: none;
   }
 }
+
+.table-console details {
+  color: var(--table-muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.table-console details summary {
+  cursor: pointer;
+  padding-block: 7px;
+}
+
+.table-console details p {
+  margin: 4px 0 7px;
+}
+
+.table-console details a {
+  color: var(--gold2);
+  text-underline-offset: 3px;
+}
+
+.table-result {
+  display: grid;
+  gap: 4px;
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid var(--table-line);
+  border-radius: 8px;
+  background: #283327;
+}
+
+.table-result[data-paid="true"] {
+  background: #25432d;
+}
+
+.table-result span {
+  color: #d2dbcc;
+  font-size: 0.85rem;
+}
