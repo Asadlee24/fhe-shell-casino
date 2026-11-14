@@ -7,6 +7,8 @@ export default tseslint.config(
   {
     ignores: [
       "fhevmTemp/**",
+      "frontend/.next/**",
+      "frontend/next-env.d.ts",
       "tmp/**",
       ".coverage_artifacts/**",
       ".coverage_cache/**",
@@ -35,21 +37,26 @@ export default tseslint.config(
     },
   },
   {
-    files: ["**/*.ts"],
+    files: ["**/*.{ts,tsx}"],
+    rules: {
+      "@typescript-eslint/no-inferrable-types": "off",
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        { argsIgnorePattern: "_", varsIgnorePattern: "_" },
+      ],
+    },
+  },
+  {
+    files: ["hardhat.config.ts", "{deploy,tasks,test}/**/*.ts", "frontend/**/*.{ts,tsx}"],
     languageOptions: {
       parserOptions: {
-        project: "./tsconfig.json",
+        project: ["./tsconfig.json", "./frontend/tsconfig.json"],
       },
     },
     rules: {
       "@typescript-eslint/no-floating-promises": [
         "error",
         { ignoreIIFE: true, ignoreVoid: true },
-      ],
-      "@typescript-eslint/no-inferrable-types": "off",
-      "@typescript-eslint/no-unused-vars": [
-        "error",
-        { argsIgnorePattern: "_", varsIgnorePattern: "_" },
       ],
     },
   }

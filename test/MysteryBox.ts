@@ -63,8 +63,7 @@ describe("MysteryBox", function () {
     expect(prize).to.be.lte(4);
     expect(roll).to.be.lt(1024);
 
-    const expected =
-      roll < 614 ? 1 : roll < 870 ? 2 : roll < 993 ? 3 : 4;
+    const expected = roll < 614 ? 1 : roll < 870 ? 2 : roll < 993 ? 3 : 4;
     expect(prize).to.eq(expected);
   });
 
@@ -82,9 +81,7 @@ describe("MysteryBox", function () {
     await (await box.connect(alice).buyBox(encrypted.handles[0], encrypted.inputProof)).wait();
     const prizeHandle = await box.getBox(alice.address, 1);
 
-    await expect(
-      fhevm.userDecryptEuint(FhevmType.euint32, prizeHandle, address, bob),
-    ).to.be.rejected;
+    await expect(fhevm.userDecryptEuint(FhevmType.euint32, prizeHandle, address, bob)).to.be.rejected;
   });
 
   it("takes the clear ERC-20 fallback payment and still encrypts the prize", async function () {
@@ -105,12 +102,7 @@ describe("MysteryBox", function () {
     });
     expect(opened).to.not.eq(undefined);
 
-    const prize = await fhevm.userDecryptEuint(
-      FhevmType.euint32,
-      await box.getBox(alice.address, 1),
-      address,
-      alice,
-    );
+    const prize = await fhevm.userDecryptEuint(FhevmType.euint32, await box.getBox(alice.address, 1), address, alice);
     expect(prize).to.be.gte(1);
     expect(prize).to.be.lte(4);
   });
