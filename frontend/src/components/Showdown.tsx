@@ -25,7 +25,6 @@ import {
   txUrl,
 } from "@/lib/config";
 import { showdownAbi } from "@/lib/showdownAbi";
-import { getEthereumProvider } from "@/lib/ethereum";
 import { useWallet } from "@/lib/wallet";
 
 const PHASE = ["Empty", "Open", "Challenge", "Resolved"];
@@ -80,7 +79,7 @@ export function Showdown() {
   const powerValue = round ? decrypt.data?.[round.powerHandle as `0x${string}`] : undefined;
 
   async function signer() {
-    const ethereum = walletProvider ?? getEthereumProvider();
+    const ethereum = walletProvider;
     if (!ethereum) throw new Error("Connect a wallet first.");
     return new BrowserProvider(ethereum).getSigner();
   }

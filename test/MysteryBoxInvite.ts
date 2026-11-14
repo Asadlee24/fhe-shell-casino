@@ -1,6 +1,6 @@
 import { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
 import { ethers, fhevm } from "hardhat";
-import { MockCUSDT, MockERC20, MysteryBoxInvite } from "../types";
+import { ShellStakeToken, MockERC20, MysteryBoxInvite } from "../types";
 import { expect } from "chai";
 import { FhevmType } from "@fhevm/hardhat-plugin";
 
@@ -12,7 +12,7 @@ for (const a of POWERS) for (const b of POWERS) for (const c of POWERS) validSco
 
 async function deployFixture(scoreDebug: boolean) {
   const erc = await ethers.deployContract("MockERC20");
-  const cusdt = await ethers.deployContract("MockCUSDT");
+  const cusdt = await ethers.deployContract("ShellStakeToken");
   const invite = await ethers.deployContract("MysteryBoxInvite", [
     await cusdt.getAddress(),
     await erc.getAddress(),
@@ -102,23 +102,28 @@ describe("MysteryBoxInvite", function () {
     );
     expect(validScores.has(aliceScore)).to.eq(true);
     expect(validScores.has(bobScore)).to.eq(true);
-    await expect(
-      fhevm.userDecryptEuint(FhevmType.euint32, await invite.getScoreHandle(inviteId, 0), address, bob),
-    ).to.be.rejected;
-    await expect(
-      fhevm.publicDecryptEuint(FhevmType.euint32, await invite.getScoreHandle(inviteId, 0)),
-    ).to.be.rejected;
+    await expect(fhevm.userDecryptEuint(FhevmType.euint32, await invite.getScoreHandle(inviteId, 0), address, bob)).to
+      .be.rejected;
+    await expect(fhevm.publicDecryptEuint(FhevmType.euint32, await invite.getScoreHandle(inviteId, 0))).to.be.rejected;
 
-    const expected = bobScore > aliceScore ? bob.address : alice.address;
+    const expected = bobScore === aliceScore ? ethers.ZeroAddress : bobScore > aliceScore ? bob.address : alice.address;
     const revealed = await fhevm.publicDecrypt([sealed.winnerHandle]);
-    expect(revealed.clearValues[sealed.winnerHandle]).to.eq(expected);
+    expect(revealed.clearValues[sealed.winnerHandle as `0x${string}`]).to.eq(expected);
 
     await (await invite.claim(inviteId, revealed.abiEncodedClearValues, revealed.decryptionProof)).wait();
+    for (const slot of [0, 1]) {
+      if ((await invite.getPayment(inviteId, slot)).due > 0n) await (await invite.paySeat(inviteId, slot)).wait();
+    }
     const paid = await invite.getInvite(inviteId);
     expect(paid.winner).to.eq(expected);
     expect(paid.claimed).to.eq(true);
-    expect(await erc.balanceOf(expected)).to.eq(STAKE * 2n);
-    expect(await erc.balanceOf(expected === alice.address ? bob.address : alice.address)).to.eq(0n);
+    expect(paid.pot).to.eq(0n);
+    expect(await erc.balanceOf(alice.address)).to.eq(
+      expected === ethers.ZeroAddress ? STAKE : expected === alice.address ? STAKE * 2n : 0n,
+    );
+    expect(await erc.balanceOf(bob.address)).to.eq(
+      expected === ethers.ZeroAddress ? STAKE : expected === bob.address ? STAKE * 2n : 0n,
+    );
   });
 
   it("rejects score decryption when debug access is off", async function () {
@@ -136,15 +141,11 @@ describe("MysteryBoxInvite", function () {
       alice,
     );
     expect(ball).to.be.oneOf([0n, 1n, 2n]);
-    await expect(
-      fhevm.userDecryptEuint(FhevmType.euint32, await invite.getBallHandle(inviteId, 0), address, bob),
-    ).to.be.rejected;
-    await expect(
-      fhevm.userDecryptEuint(FhevmType.euint32, await invite.getScoreHandle(inviteId, 0), address, alice),
-    ).to.be.rejected;
-    await expect(
-      fhevm.publicDecryptEuint(FhevmType.euint32, await invite.getScoreHandle(inviteId, 0)),
-    ).to.be.rejected;
+    await expect(fhevm.userDecryptEuint(FhevmType.euint32, await invite.getBallHandle(inviteId, 0), address, bob)).to.be
+      .rejected;
+    await expect(fhevm.userDecryptEuint(FhevmType.euint32, await invite.getScoreHandle(inviteId, 0), address, alice)).to
+      .be.rejected;
+    await expect(fhevm.publicDecryptEuint(FhevmType.euint32, await invite.getScoreHandle(inviteId, 0))).to.be.rejected;
   });
 
   it("requires three hands before committing", async function () {
@@ -154,7 +155,10 @@ describe("MysteryBoxInvite", function () {
     const inviteId = await invite.connect(alice).createInvite.staticCall();
     await (await invite.connect(alice).createInvite()).wait();
     await (await invite.connect(alice).play(inviteId, 1)).wait();
-    await expect(invite.connect(alice).commitFallback(inviteId)).to.be.revertedWithCustomError(invite, "NeedThreeHands");
+    await expect(invite.connect(alice).commitFallback(inviteId)).to.be.revertedWithCustomError(
+      invite,
+      "NeedThreeHands",
+    );
   });
 
   it("refunds the committed stake after the 48 hour link expires before the round resolves", async function () {
@@ -173,27 +177,110 @@ describe("MysteryBoxInvite", function () {
     await expect(invite.connect(bob).joinInvite(inviteId)).to.be.revertedWithCustomError(invite, "InviteExpired");
 
     await (await invite.refundExpired(inviteId)).wait();
+    await (await invite.paySeat(inviteId, 0)).wait();
     const closed = await invite.getInvite(inviteId);
     expect(closed.phase).to.eq(3n);
     expect(closed.pot).to.eq(0n);
     expect(await erc.balanceOf(alice.address)).to.eq(STAKE);
   });
 
-  it("commits a confidential $1 stake after three hands", async function () {
+  for (const voidDraw of [false, true]) {
+    it(`refunds both seats for ${voidDraw ? "an excluded draw" : "a tie"}`, async function () {
+      if (!fhevm.isMock) this.skip();
+      const fixture = await deployFixture(false);
+      erc = fixture.erc;
+      const draws = await ethers.deployContract("ShellDrawFixture", [
+        await fixture.cusdt.getAddress(),
+        await erc.getAddress(),
+      ]);
+      invite = draws;
+      address = await draws.getAddress();
+      await fund(alice, address);
+      await fund(bob, address);
+      await (await invite.connect(alice).createInvite()).wait();
+      await (await invite.connect(bob).joinInvite(1)).wait();
+      await (await draws.setDraw(voidDraw ? 0xffffffff : 0)).wait();
+      await playThree(1n, alice, [1, 1, 1]);
+      await playThree(1n, bob, [1, 1, 1]);
+      await (await invite.connect(alice).commitFallback(1)).wait();
+      await (await invite.connect(bob).commitFallback(1)).wait();
+      const { winnerHandle } = await invite.getInvite(1);
+      const proof = await fhevm.publicDecrypt([winnerHandle]);
+      await (await invite.claim(1, proof.abiEncodedClearValues, proof.decryptionProof)).wait();
+      await (await invite.paySeat(1, 0)).wait();
+      expect((await invite.getInvite(1)).claimed).to.eq(false);
+      await (await invite.paySeat(1, 1)).wait();
+      expect((await invite.getInvite(1)).claimed).to.eq(true);
+      expect(await erc.balanceOf(alice.address)).to.eq(STAKE);
+      expect(await erc.balanceOf(bob.address)).to.eq(STAKE);
+    });
+  }
+
+  it("verifies confidential funding and retries only an outstanding payout", async function () {
     if (!fhevm.isMock) this.skip();
-    ({ invite, erc, address } = await deployFixture(true));
-    await fund(alice, address);
-    const inviteId = await invite.connect(alice).createInvite.staticCall();
+    const fixture = await deployFixture(false);
+    ({ invite, erc, address } = fixture);
+    const { cusdt } = fixture;
+    const id = await invite.connect(alice).createInvite.staticCall();
     await (await invite.connect(alice).createInvite()).wait();
-    await playThree(inviteId, alice, [0, 1, 2]);
-    const encrypted = await fhevm.createEncryptedInput(address, alice.address).add64(STAKE).encrypt();
-    await (await invite.connect(alice).commit(inviteId, encrypted.handles[0], encrypted.inputProof)).wait();
-    const score = await fhevm.userDecryptEuint(
-      FhevmType.euint32,
-      await invite.getScoreHandle(inviteId, 0),
-      address,
+    await (await invite.connect(bob).joinInvite(id)).wait();
+    await playThree(id, alice, [0, 1, 2]);
+    await playThree(id, bob, [0, 1, 2]);
+    const block = (await ethers.provider.getBlock("latest"))!;
+
+    async function confirm(slot: number) {
+      const { pendingHandle } = await invite.getPayment(id, slot);
+      const proof = await fhevm.publicDecrypt([pendingHandle]);
+      await (await invite.confirmTransfer(id, slot, proof.abiEncodedClearValues, proof.decryptionProof)).wait();
+      return proof;
+    }
+    for (const player of [alice, bob]) {
+      await (await cusdt.connect(player).setOperator(address, block.timestamp + 3600)).wait();
+    }
+    await (await cusdt.mint(alice.address, STAKE - 1n)).wait();
+    await (await invite.connect(alice).commit(id)).wait();
+    const emptyStake = await confirm(0);
+    expect((await invite.getInvite(id)).pot).to.eq(0n);
+    expect((await invite.getCommitted(id)).hostCommitted).to.eq(false);
+    await expect(
+      invite.confirmTransfer(id, 0, emptyStake.abiEncodedClearValues, emptyStake.decryptionProof),
+    ).to.be.revertedWithCustomError(invite, "InvalidPayment");
+    for (const [slot, player] of [alice, bob].entries()) {
+      await (await cusdt.mint(player.address, STAKE)).wait();
+      await (await invite.connect(player).commit(id)).wait();
+      await confirm(slot);
+    }
+    const { winnerHandle } = await invite.getInvite(id);
+    const result = await fhevm.publicDecrypt([winnerHandle]);
+    await (await invite.claim(id, result.abiEncodedClearValues, result.decryptionProof)).wait();
+    await expect(invite.claim(id, result.abiEncodedClearValues, result.decryptionProof)).to.be.revertedWithCustomError(
+      invite,
+      "BadPhase",
+    );
+    await (await cusdt.setPayoutLimit(0)).wait();
+    const winner = (await invite.getInvite(id)).winner;
+    const recipients = winner === ethers.ZeroAddress ? [0, 1] : [winner === alice.address ? 0 : 1];
+    for (const slot of recipients) await (await invite.paySeat(id, slot)).wait();
+    for (const slot of recipients) await confirm(slot);
+    expect((await invite.getInvite(id)).claimed).to.eq(false);
+    expect((await invite.getInvite(id)).pot).to.eq(2n * STAKE);
+    await (await cusdt.setPayoutLimit(STAKE)).wait();
+    for (const slot of recipients) {
+      while ((await invite.getPayment(id, slot)).due > 0n) {
+        await (await invite.paySeat(id, slot)).wait();
+        await confirm(slot);
+      }
+    }
+    expect((await invite.getInvite(id)).claimed).to.eq(true);
+    expect((await invite.getInvite(id)).pot).to.eq(0n);
+    const hostBalance = await fhevm.userDecryptEuint(
+      FhevmType.euint64,
+      await cusdt.confidentialBalanceOf(alice.address),
+      await cusdt.getAddress(),
       alice,
     );
-    expect(validScores.has(score)).to.eq(true);
+    expect(hostBalance).to.eq(
+      STAKE - 1n + (winner === ethers.ZeroAddress ? STAKE : winner === alice.address ? 2n * STAKE : 0n),
+    );
   });
 });

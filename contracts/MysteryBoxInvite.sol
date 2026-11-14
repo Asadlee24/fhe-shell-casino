@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.27;
 
-import {FHE, eaddress, ebool, euint32, euint64, externalEuint64} from "@fhevm/solidity/lib/FHE.sol";
+import {FHE, eaddress, ebool, euint32, euint64} from "@fhevm/solidity/lib/FHE.sol";
 import {ZamaEthereumConfig} from "@fhevm/solidity/config/ZamaConfig.sol";
 
 /// @notice Confidential ERC-7984 pull and payout. The caller must already be an operator for pulls.
@@ -9,6 +9,10 @@ interface IInviteToken {
     function confidentialTransferFrom(address from, address to, euint64 amount) external returns (euint64 transferred);
 
     function confidentialTransfer(address to, euint64 amount) external returns (euint64 transferred);
+}
+
+interface IClearStakeToken {
+    function balanceOf(address owner) external view returns (uint256);
 }
 
 /// @title Mystery Box Invite
@@ -29,7 +33,8 @@ contract MysteryBoxInvite is ZamaEthereumConfig {
         Empty,
         Open,
         Sealed,
-        Refunded
+        Refunded,
+        Settling
     }
 
     struct Invite {
@@ -41,6 +46,26 @@ contract MysteryBoxInvite is ZamaEthereumConfig {
         address winner;
         bool claimed;
         eaddress encryptedWinner;
+    }
+
+    struct Payment {
+        uint64 funded;
+        uint64 due;
+        euint64 pending;
+    }
+
+    mapping(uint256 => Payment[2]) private _payments;
+    mapping(uint256 => ebool) private _voidDraw;
+    bool private _transferring;
+    error TransferInProgress();
+    error InvalidPayment();
+    event SettlementComplete(uint256 indexed inviteId, address winner);
+
+    modifier locked() {
+        if (_transferring) revert TransferInProgress();
+        _transferring = true;
+        _;
+        _transferring = false;
     }
 
     address public immutable cUsdt;
@@ -66,7 +91,6 @@ contract MysteryBoxInvite is ZamaEthereumConfig {
     event PlayerCommitted(uint256 indexed inviteId, address indexed player);
     event InviteSealed(uint256 indexed inviteId, bytes32 winnerHandle);
     event PrizeClaimed(uint256 indexed inviteId, address indexed winner, uint256 prize);
-    event InviteRefunded(uint256 indexed inviteId, address indexed host, uint256 stake);
 
     error ZeroToken();
     error BadPhase();
@@ -76,9 +100,6 @@ contract MysteryBoxInvite is ZamaEthereumConfig {
     error InviteStillOpen();
     error PaymentKindMismatch();
     error FallbackPaymentFailed();
-    error NoWinner();
-    error AlreadyClaimed();
-    error PayoutFailed();
     error BadCup();
     error AlreadyPlayed();
     error NotSeated();
@@ -86,13 +107,15 @@ contract MysteryBoxInvite is ZamaEthereumConfig {
     error AlreadyCommitted();
 
     constructor(address cUsdt_, address underlyingToken_, bool scoreDebug_) {
-        if (cUsdt_ == address(0) || underlyingToken_ == address(0)) revert ZeroToken();
+        if (cUsdt_.code.length == 0 || underlyingToken_.code.length == 0) revert ZeroToken();
         cUsdt = cUsdt_;
         underlyingToken = underlyingToken_;
         scoreDebug = scoreDebug_;
     }
 
-    function getInvite(uint256 inviteId)
+    function getInvite(
+        uint256 inviteId
+    )
         external
         view
         returns (
@@ -136,7 +159,7 @@ contract MysteryBoxInvite is ZamaEthereumConfig {
         return slot == 0 ? _score0[inviteId] : _score1[inviteId];
     }
 
-    /// @notice Ball index 0–2 for the last hand. Only the player who played that seat can decrypt it.
+    /// @notice Ball index 0–2, or 3 for a void draw. Only the player who played that seat can decrypt it.
     function getBallHandle(uint256 inviteId, uint8 slot) external view returns (euint32) {
         return slot == 0 ? _ball0[inviteId] : _ball1[inviteId];
     }
@@ -172,52 +195,95 @@ contract MysteryBoxInvite is ZamaEthereumConfig {
         emit PlayerPlayed(inviteId, msg.sender, cup);
     }
 
-    /// @notice Pay the $1 stake and commit the score. The second commit resolves the round.
-    function commit(uint256 inviteId, externalEuint64 encryptedAmount, bytes calldata inputProof) external {
-        euint64 transferred = _pullConfidential(encryptedAmount, inputProof);
-        _commit(inviteId, msg.sender, 1, FHE.ge(transferred, FHE.asEuint64(uint64(STAKE))));
+    function getPayment(
+        uint256 id,
+        uint8 slot
+    ) external view returns (uint64 funded, uint64 due, bytes32 pendingHandle) {
+        Payment storage payment = _payments[id][slot];
+        return (payment.funded, payment.due, euint64.unwrap(payment.pending));
     }
 
-    /// @notice Clear ERC-20 stake. The UI labels this control "Fallback Payment".
-    function commitFallback(uint256 inviteId) external {
-        _pullUnderlying(msg.sender, STAKE);
-        _commit(inviteId, msg.sender, 2, FHE.asEbool(true));
+    function commit(uint256 id) external locked {
+        (uint8 slot, uint64 amount) = _prepareStake(id, 1);
+        _recordTransfer(
+            id,
+            slot,
+            IInviteToken(cUsdt).confidentialTransferFrom(msg.sender, address(this), _tokenAmount(amount))
+        );
     }
 
-    /// @notice Returns the committed stake after the 48-hour link expires before the round resolves.
-    function refundExpired(uint256 inviteId) external {
-        Invite storage invite = _invites[inviteId];
-        if (invite.phase != Phase.Open) revert BadPhase();
-        if (block.timestamp <= invite.deadline) revert InviteStillOpen();
-        address refundee;
-        if (_committed0[inviteId]) refundee = _players[inviteId][0];
-        else if (_committed1[inviteId]) refundee = _players[inviteId][1];
-        invite.phase = Phase.Refunded;
-        if (refundee != address(0)) {
-            uint256 stake = invite.pot;
-            invite.pot = 0;
-            _payout(invite.paymentKind, refundee, stake);
-            emit InviteRefunded(inviteId, refundee, stake);
+    function commitFallback(uint256 id) external locked {
+        (uint8 slot, uint64 amount) = _prepareStake(id, 2);
+        _moveClear(
+            abi.encodeWithSignature("transferFrom(address,address,uint256)", msg.sender, address(this), amount),
+            address(this),
+            amount
+        );
+        _creditStake(id, slot, amount);
+    }
+
+    function confirmTransfer(uint256 id, uint8 slot, bytes calldata cleartexts, bytes calldata proof) external locked {
+        Invite storage invite = _invites[id];
+        Payment storage payment = _payments[id][slot];
+        if (!FHE.isInitialized(payment.pending)) revert InvalidPayment();
+        _verify(euint64.unwrap(payment.pending), cleartexts, proof);
+        uint64 amount = abi.decode(cleartexts, (uint64));
+        payment.pending = euint64.wrap(bytes32(0));
+        if (invite.phase == Phase.Open) {
+            if (amount > STAKE - payment.funded) revert InvalidPayment();
+            _creditStake(id, slot, amount);
+        } else {
+            _creditPayout(id, slot, amount);
         }
     }
 
-    /// @notice Pay $2 after a public decryption proof of the winner address. Scores stay encrypted.
-    function claim(uint256 inviteId, bytes calldata cleartexts, bytes calldata decryptionProof) external {
-        Invite storage invite = _invites[inviteId];
-        if (invite.phase != Phase.Sealed) revert BadPhase();
-        if (invite.claimed) revert AlreadyClaimed();
-        bytes32 handle = eaddress.unwrap(invite.encryptedWinner);
-        if (handle == bytes32(0)) revert NoWinner();
+    function refundExpired(uint256 id) external locked {
+        Invite storage invite = _invites[id];
+        if (invite.phase != Phase.Open) revert BadPhase();
+        if (block.timestamp <= invite.deadline) revert InviteStillOpen();
+        Payment[2] storage payments = _payments[id];
+        if (FHE.isInitialized(payments[0].pending) || FHE.isInitialized(payments[1].pending)) revert InvalidPayment();
+        invite.phase = Phase.Refunded;
+        payments[0].due = payments[0].funded;
+        payments[1].due = payments[1].funded;
+        _finish(id);
+    }
 
+    function claim(uint256 id, bytes calldata cleartexts, bytes calldata proof) external locked {
+        Invite storage invite = _invites[id];
+        if (invite.phase != Phase.Sealed) revert BadPhase();
+        _verify(eaddress.unwrap(invite.encryptedWinner), cleartexts, proof);
+        address result = abi.decode(cleartexts, (address));
+        bool voided = result == address(1);
+        invite.phase = voided ? Phase.Refunded : Phase.Settling;
+        invite.winner = voided ? address(0) : result;
+        if (result == address(0) || voided) {
+            _payments[id][0].due = uint64(STAKE);
+            _payments[id][1].due = uint64(STAKE);
+        } else {
+            _payments[id][_seatOf(id, result)].due = uint64(PRIZE);
+        }
+    }
+
+    function paySeat(uint256 id, uint8 slot) external locked {
+        Invite storage invite = _invites[id];
+        if (invite.phase != Phase.Settling && invite.phase != Phase.Refunded) revert BadPhase();
+        Payment storage payment = _payments[id][slot];
+        if (payment.due == 0 || FHE.isInitialized(payment.pending)) revert InvalidPayment();
+        address player = _players[id][slot];
+        if (invite.paymentKind == 2) {
+            _moveClear(abi.encodeWithSignature("transfer(address,uint256)", player, payment.due), player, payment.due);
+            _creditPayout(id, slot, payment.due);
+        } else {
+            _recordTransfer(id, slot, IInviteToken(cUsdt).confidentialTransfer(player, _tokenAmount(payment.due)));
+        }
+    }
+
+    function _verify(bytes32 handle, bytes calldata cleartexts, bytes calldata proof) private {
+        if (handle == bytes32(0)) revert InvalidPayment();
         bytes32[] memory handles = new bytes32[](1);
         handles[0] = handle;
-        FHE.checkSignatures(handles, cleartexts, decryptionProof);
-
-        address winner = abi.decode(cleartexts, (address));
-        invite.winner = winner;
-        invite.claimed = true;
-        _payout(invite.paymentKind, winner, invite.pot);
-        emit PrizeClaimed(inviteId, winner, invite.pot);
+        FHE.checkSignatures(handles, cleartexts, proof);
     }
 
     function _open(address host) internal returns (uint256 inviteId) {
@@ -231,36 +297,35 @@ contract MysteryBoxInvite is ZamaEthereumConfig {
         emit PlayerJoined(inviteId, host);
     }
 
-    function _commit(uint256 inviteId, address player, uint8 kind, ebool paid) internal {
-        Invite storage invite = _invites[inviteId];
+    function _prepareStake(uint256 id, uint8 kind) private returns (uint8 slot, uint64 amount) {
+        Invite storage invite = _invites[id];
         if (invite.phase != Phase.Open) revert BadPhase();
         if (block.timestamp > invite.deadline) revert InviteExpired();
-        uint8 slot = _seatOf(inviteId, player);
-        if (slot == 0) {
-            if (_hands0[inviteId] != HANDS_PER_PLAYER) revert NeedThreeHands();
-            if (_committed0[inviteId]) revert AlreadyCommitted();
-        } else {
-            if (_hands1[inviteId] != HANDS_PER_PLAYER) revert NeedThreeHands();
-            if (_committed1[inviteId]) revert AlreadyCommitted();
-        }
+        slot = _seatOf(id, msg.sender);
+        if ((slot == 0 ? _hands0[id] : _hands1[id]) != HANDS_PER_PLAYER) revert NeedThreeHands();
+        Payment storage payment = _payments[id][slot];
+        if (payment.funded == STAKE) revert AlreadyCommitted();
+        if (FHE.isInitialized(payment.pending)) revert InvalidPayment();
         if (invite.paymentKind == 0) invite.paymentKind = kind;
         else if (invite.paymentKind != kind) revert PaymentKindMismatch();
+        return (slot, uint64(STAKE) - payment.funded);
+    }
 
-        euint32 score = slot == 0 ? _score0[inviteId] : _score1[inviteId];
-        euint32 masked = FHE.select(paid, score, FHE.asEuint32(0));
-        if (slot == 0) _score0[inviteId] = masked;
-        else _score1[inviteId] = masked;
-        FHE.allowThis(masked);
-        if (scoreDebug) FHE.allow(masked, player);
-
-        if (slot == 0) _committed0[inviteId] = true;
-        else _committed1[inviteId] = true;
-        invite.pot += STAKE;
-
-        emit PlayerCommitted(inviteId, player);
-
-        if (_players[inviteId][1] != address(0) && _committed0[inviteId] && _committed1[inviteId]) {
-            _seal(inviteId);
+    function _creditStake(uint256 id, uint8 slot, uint64 amount) private {
+        Invite storage invite = _invites[id];
+        Payment[2] storage payments = _payments[id];
+        payments[slot].funded += amount;
+        invite.pot += amount;
+        if (payments[slot].funded == STAKE) {
+            if (slot == 0) _committed0[id] = true;
+            else _committed1[id] = true;
+            emit PlayerCommitted(id, _players[id][slot]);
+        }
+        if (_committed0[id] && _committed1[id]) _seal(id);
+        else if (
+            invite.pot == 0 && !FHE.isInitialized(payments[0].pending) && !FHE.isInitialized(payments[1].pending)
+        ) {
+            invite.paymentKind = 0;
         }
     }
 
@@ -278,8 +343,11 @@ contract MysteryBoxInvite is ZamaEthereumConfig {
         power = FHE.select(FHE.lt(roll, RARE_BELOW), FHE.asEuint32(30), power);
         power = FHE.select(FHE.lt(roll, COMMON_BELOW), FHE.asEuint32(10), power);
 
-        euint32 ball = FHE.randEuint32(4);
-        ball = FHE.select(FHE.eq(ball, FHE.asEuint32(3)), FHE.asEuint32(2), ball);
+        // Excluding the largest uint32 leaves three equally sized residue classes.
+        euint32 draw = _drawShell();
+        ebool voidDraw = FHE.eq(draw, type(uint32).max);
+        _voidDraw[inviteId] = FHE.allowThis(FHE.or(_voidDraw[inviteId], voidDraw));
+        euint32 ball = FHE.select(voidDraw, FHE.asEuint32(3), FHE.rem(draw, 3));
         ebool hit = FHE.eq(ball, FHE.asEuint32(cup));
         euint32 handScore = FHE.select(hit, power, FHE.asEuint32(0));
 
@@ -297,13 +365,23 @@ contract MysteryBoxInvite is ZamaEthereumConfig {
         if (scoreDebug) FHE.allow(slot == 0 ? _score0[inviteId] : _score1[inviteId], player);
     }
 
-    /// @notice Strict greater-than. An equal score keeps the earlier player. The score ciphertext is not published.
+    function _drawShell() internal virtual returns (euint32) {
+        return FHE.randEuint32();
+    }
+
+    /// @notice Reveal the winner, a tie, or a void draw. Scores stay encrypted.
     function _seal(uint256 inviteId) internal {
         Invite storage invite = _invites[inviteId];
         euint32 hostScore = _score0[inviteId];
         euint32 guestScore = _score1[inviteId];
         ebool guestHigher = FHE.gt(guestScore, hostScore);
-        eaddress leader = FHE.select(guestHigher, FHE.asEaddress(_players[inviteId][1]), FHE.asEaddress(_players[inviteId][0]));
+        eaddress leader = FHE.select(
+            guestHigher,
+            FHE.asEaddress(_players[inviteId][1]),
+            FHE.asEaddress(_players[inviteId][0])
+        );
+        leader = FHE.select(FHE.eq(hostScore, guestScore), FHE.asEaddress(address(0)), leader);
+        leader = FHE.select(_voidDraw[inviteId], FHE.asEaddress(address(1)), leader);
         FHE.allowThis(leader);
         FHE.makePubliclyDecryptable(leader);
         invite.encryptedWinner = leader;
@@ -311,32 +389,35 @@ contract MysteryBoxInvite is ZamaEthereumConfig {
         emit InviteSealed(inviteId, eaddress.unwrap(leader));
     }
 
-    function _pullConfidential(externalEuint64 encryptedAmount, bytes calldata inputProof) internal returns (euint64 transferred) {
-        euint64 quoted = FHE.fromExternal(encryptedAmount, inputProof);
-        FHE.allowThis(quoted);
-        FHE.allowTransient(quoted, cUsdt);
-        transferred = IInviteToken(cUsdt).confidentialTransferFrom(msg.sender, address(this), quoted);
-    }
-
-    function _pullUnderlying(address from, uint256 amount) internal {
-        (bool success, bytes memory data) = underlyingToken.call(
-            abi.encodeWithSelector(bytes4(keccak256("transferFrom(address,address,uint256)")), from, address(this), amount)
-        );
-        if (!success || (data.length != 0 && !abi.decode(data, (bool)))) revert FallbackPaymentFailed();
-    }
-
-    function _payout(uint8 kind, address to, uint256 amount) internal {
-        if (amount == 0 || to == address(0)) revert PayoutFailed();
-        if (kind == 2) {
-            (bool success, bytes memory data) = underlyingToken.call(
-                abi.encodeWithSelector(bytes4(keccak256("transfer(address,uint256)")), to, amount)
-            );
-            if (!success || (data.length != 0 && !abi.decode(data, (bool)))) revert PayoutFailed();
-            return;
-        }
-        euint64 encrypted = FHE.asEuint64(uint64(amount));
-        FHE.allowThis(encrypted);
+    function _tokenAmount(uint64 amount) private returns (euint64 encrypted) {
+        encrypted = FHE.asEuint64(amount);
         FHE.allowTransient(encrypted, cUsdt);
-        IInviteToken(cUsdt).confidentialTransfer(to, encrypted);
+    }
+
+    function _recordTransfer(uint256 id, uint8 slot, euint64 transferred) private {
+        _payments[id][slot].pending = FHE.makePubliclyDecryptable(transferred);
+    }
+
+    function _moveClear(bytes memory callData, address recipient, uint256 amount) private {
+        uint256 before = IClearStakeToken(underlyingToken).balanceOf(recipient);
+        (bool ok, bytes memory data) = underlyingToken.call(callData);
+        if (!ok || (data.length != 0 && !abi.decode(data, (bool)))) revert FallbackPaymentFailed();
+        if (IClearStakeToken(underlyingToken).balanceOf(recipient) != before + amount) revert InvalidPayment();
+    }
+
+    function _creditPayout(uint256 id, uint8 slot, uint64 amount) private {
+        Payment storage payment = _payments[id][slot];
+        if (amount > payment.due) revert InvalidPayment();
+        payment.due -= amount;
+        _invites[id].pot -= amount;
+        _finish(id);
+    }
+
+    function _finish(uint256 id) private {
+        Invite storage invite = _invites[id];
+        if (invite.pot != 0) return;
+        invite.claimed = true;
+        if (invite.winner != address(0)) emit PrizeClaimed(id, invite.winner, PRIZE);
+        emit SettlementComplete(id, invite.winner);
     }
 }

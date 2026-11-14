@@ -16,7 +16,6 @@ import {
   addressUrl,
   txUrl,
 } from "@/lib/config";
-import { getEthereumProvider } from "@/lib/ethereum";
 import { useWallet } from "@/lib/wallet";
 
 type Opened = {
@@ -61,7 +60,7 @@ export function Game() {
     typeof prizeValue === "bigint" ? PRIZE_NAMES[Number(prizeValue)] ?? `Prize ${prizeValue}` : "";
 
   async function signer() {
-    const ethereum = walletProvider ?? getEthereumProvider();
+    const ethereum = walletProvider;
     if (!ethereum) throw new Error("No wallet found.");
     const provider = new BrowserProvider(ethereum);
     return provider.getSigner();
