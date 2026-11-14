@@ -68,7 +68,8 @@ export function InviteTable() {
   const params = useSearchParams();
   const invited = params.get("invite") ?? "";
   const requested = params.get("contract") ?? "";
-  const legacy = !!invited && (!requested || same(requested, LEGACY_INVITE_ADDRESS));
+  const legacy =
+    !!invited && !!requested && same(requested, LEGACY_INVITE_ADDRESS) && !same(LEGACY_INVITE_ADDRESS, UPDATED_ADDRESS);
   const INVITE_ADDRESS = (
     legacy ? LEGACY_INVITE_ADDRESS : !requested || same(requested, UPDATED_ADDRESS) ? UPDATED_ADDRESS : ""
   ) as `0x${string}`;
