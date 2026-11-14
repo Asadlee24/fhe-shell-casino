@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { useShellSound } from "@/lib/useShellSound";
 import { useSearchParams } from "next/navigation";
@@ -24,6 +24,7 @@ import { useWallet } from "@/lib/wallet";
 
 const ShellScene = dynamic(() => import("./ShellScene"), { ssr: false });
 
+const tableRpc = new JsonRpcProvider(SEPOLIA_RPC_URL, 11155111, { staticNetwork: true });
 const HANDS = 3;
 const SLOTS = [0, 1] as const;
 type Payment = { funded: bigint; due: bigint; pendingHandle: `0x${string}` };
@@ -91,6 +92,7 @@ export function InviteTable() {
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [now, setNow] = useState(Date.now());
+  const [showScene, setShowScene] = useState(false);
   const [picking, setPicking] = useState(false);
   const [chosen, setChosen] = useState<number | null>(null);
   const [wantBall, setWantBall] = useState(false);
@@ -119,33 +121,53 @@ export function InviteTable() {
     return () => window.clearInterval(timer);
   }, []);
 
+  const pollTable = useEffectEvent(async (id: string, active: () => boolean) => {
+    try {
+      await refresh(id, active);
+      if (active()) setReadError("");
+    } catch {
+      if (active()) setReadError("Could not refresh this table. Retrying…");
+    }
+  });
+
   useEffect(() => {
-    if (!invited) return;
+    if (!invited || !INVITE_ADDRESS) return;
     setInviteId(invited);
-    const poll = () =>
-      void refresh(invited).then(
-        () => setReadError(""),
-        () => setReadError("Could not refresh this table. Retrying…"),
-      );
-    poll();
-    const timer = window.setInterval(poll, 8_000);
-    return () => window.clearInterval(timer);
+    let cancelled = false;
+    let running = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    async function poll() {
+      if (cancelled || running || document.hidden) return;
+      running = true;
+      await pollTable(invited, () => !cancelled);
+      running = false;
+      if (!cancelled && !document.hidden) timer = setTimeout(poll, 8_000);
+    }
+
+    function onVisibilityChange() {
+      clearTimeout(timer);
+      if (!document.hidden) void poll();
+    }
+
+    void poll();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, [invited, account, INVITE_ADDRESS]);
 
-  function reader() {
-    return new Contract(
-      INVITE_ADDRESS,
-      inviteAbi,
-      new JsonRpcProvider(SEPOLIA_RPC_URL, 11155111, { staticNetwork: true, cacheTimeout: -1 }),
-    );
-  }
+  const boxReader = useMemo(
+    () => (INVITE_ADDRESS ? new Contract(INVITE_ADDRESS, inviteAbi, tableRpc) : null),
+    [INVITE_ADDRESS],
+  );
 
   useEffect(() => {
-    if (!INVITE_ADDRESS || legacy) return;
+    if (!boxReader || legacy || same(INVITE_ADDRESS, PREVIOUS_INVITE_ADDRESS)) return;
     let active = true;
-    const box = reader();
-    const rpc = box.runner!.provider as JsonRpcProvider;
-    void box.FAST_FLOW_VERSION().then(
+    void boxReader.FAST_FLOW_VERSION().then(
       (version: bigint) => {
         if (active && version === 1n) setFastContract(INVITE_ADDRESS);
       },
@@ -153,9 +175,8 @@ export function InviteTable() {
     );
     return () => {
       active = false;
-      rpc.destroy();
     };
-  }, [INVITE_ADDRESS, legacy]);
+  }, [boxReader, INVITE_ADDRESS, legacy]);
 
   async function signer() {
     const ethereum = walletProvider;
@@ -165,10 +186,14 @@ export function InviteTable() {
     return new BrowserProvider(ethereum).getSigner(account);
   }
 
-  async function refresh(id = inviteId) {
-    if (!INVITE_ADDRESS || !/^[1-9]\d{0,77}$/.test(id) || BigInt(id) >= 1n << 256n) return;
-    const box = reader();
-    const blockTag = await box.runner!.provider!.getBlockNumber();
+  const lastApplied = useRef(0);
+  const refreshSequence = useRef(0);
+
+  async function refresh(id = inviteId, active = () => true) {
+    if (!boxReader || !/^[1-9]\d{0,77}$/.test(id) || BigInt(id) >= 1n << 256n) return;
+    const sequence = ++refreshSequence.current;
+    const box = boxReader;
+    const blockTag = await tableRpc.getBlockNumber();
     const [snap, seats, hands, committed, payments] = await Promise.all([
       box.getInvite(id, { blockTag }),
       box.getSeats(id, { blockTag }),
@@ -176,7 +201,9 @@ export function InviteTable() {
       box.getCommitted(id, { blockTag }),
       legacy ? [] : Promise.all(SLOTS.map((slot) => box.getPayment(id, slot, { blockTag }))),
     ]);
+    if (!active() || sequence < lastApplied.current) return;
     if (snap.host === ZeroAddress) {
+      lastApplied.current = sequence;
       setInvite(null);
       setError("This invite link does not match a table.");
       return;
@@ -184,6 +211,8 @@ export function InviteTable() {
     const mine = same(account, seats.player0) ? 0 : same(account, seats.player1) ? 1 : -1;
     const iPlayed = mine === 0 ? hands.hostHands > 0 : mine === 1 ? hands.guestHands > 0 : false;
     const ballHandle = iPlayed ? ((await box.getBallHandle(id, mine, { blockTag })) as string) : `0x${"0".repeat(64)}`;
+    if (!active() || sequence < lastApplied.current) return;
+    lastApplied.current = sequence;
     setInvite({
       host: snap.host,
       deadline: Number(snap.deadline),
@@ -307,6 +336,7 @@ export function InviteTable() {
   }
 
   function startRound() {
+    setShowScene(true);
     playSound("shuffle", true);
     setChosen(null);
     setWantBall(false);
@@ -490,9 +520,15 @@ export function InviteTable() {
           </header>
           <div className="felt-wrap">
             <div className="felt">
-              <ShellScene picking={picking} revealed={ballKnown ? myBall : -1} />
+              {showScene && <ShellScene picking={picking} revealed={ballKnown ? myBall : -1} />}
               <div className="table-rail">
-                <span>{invite ? `Table ${inviteId}` : "Sepolia testnet"}</span>
+                <span>
+                  {picking
+                    ? `Pick a shell · Hand ${myHands + 1}/${HANDS}`
+                    : invite
+                      ? `Table ${inviteId}`
+                      : "Three-shell table"}
+                </span>
                 <button className="sound-toggle" type="button" aria-pressed={!muted} onClick={toggleSound}>
                   Sound {muted ? "off" : "on"}
                 </button>

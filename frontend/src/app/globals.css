@@ -685,7 +685,10 @@ button.cup .ball.show {
 .table-stage .marquee h1 {
   margin: 10px 0 0;
   color: var(--table-ink);
-  font: 400 clamp(3.8rem, 8vw, 7rem) / 0.95 "Instrument Serif", Georgia, serif;
+  font:
+    400 clamp(3.8rem, 8vw, 7rem) / 0.95 "Instrument Serif",
+    Georgia,
+    serif;
   letter-spacing: -0.035em;
 }
 
@@ -702,7 +705,9 @@ button.cup .ball.show {
   border: 1px solid #84684a;
   border-radius: 24px;
   background: linear-gradient(145deg, #67513b, #28241c 48%, #58432e);
-  box-shadow: 0 22px 42px #050b0880, inset 0 0 0 2px #160f0a70;
+  box-shadow:
+    0 22px 42px #050b0880,
+    inset 0 0 0 2px #160f0a70;
 }
 
 .table-stage .felt {
@@ -873,7 +878,9 @@ button.cup .ball.show {
   border-radius: 8px;
   background: var(--gold2);
   color: #241910;
-  transition: background-color 140ms ease, border-color 140ms ease;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease;
 }
 
 .table-console button:not(.ghost):not(:disabled):hover {
@@ -910,11 +917,61 @@ button.cup .ball.show {
   flex-shrink: 0;
 }
 
+@media (min-width: 761px) and (max-height: 820px) {
+  .table-room {
+    padding-top: 22px;
+  }
+
+  .table-stage .marquee h1 {
+    font-size: clamp(3.75rem, 7.5vw, 5.5rem);
+  }
+
+  .table-stage .felt {
+    min-height: clamp(250px, 43vh, 345px);
+  }
+}
+
 @media (max-width: 760px) {
+  .table-room {
+    padding: 14px 12px 24px;
+  }
+
+  header.site {
+    width: calc(100% - 24px);
+    padding: 10px 0;
+    gap: 8px;
+  }
+
+  header.site .brand {
+    gap: 6px;
+    letter-spacing: 0;
+  }
+
+  header.site .brand img {
+    width: 28px;
+    height: 28px;
+  }
+
+  header.site nav {
+    gap: 10px;
+    font-size: 0.8rem;
+    justify-content: flex-end;
+  }
+
+  .table-stage .marquee h1 {
+    font-size: clamp(3rem, 11vw, 4.6rem);
+    margin-top: 4px;
+  }
+
+  .table-stage .marquee p {
+    margin: 7px 0 13px;
+    font-size: 0.875rem;
+  }
+
   .table-desk {
     grid-template-columns: minmax(0, 1fr);
     max-width: 580px;
-    gap: 18px;
+    gap: 12px;
   }
 
   .table-stage .felt-wrap {
@@ -924,6 +981,24 @@ button.cup .ball.show {
 
   .table-stage .felt {
     border-radius: 14px;
+    min-height: clamp(192px, 48vw, 260px);
+    padding-top: 42px;
+  }
+
+  .table-stage .table-rail {
+    inset: 8px 10px auto;
+  }
+
+  .table-console {
+    padding: 12px;
+  }
+
+  .table-seat {
+    min-height: 44px;
+  }
+
+  .table-console .table-msg {
+    margin: 10px 0;
   }
 }
 
