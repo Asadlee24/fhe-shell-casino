@@ -20,7 +20,7 @@ import {
   explainChainError,
 } from "@/lib/config";
 import { inviteAbi } from "@/lib/inviteAbi";
-import { useWallet } from "@/lib/wallet";
+import { TableWalletConnect, useWallet } from "@/lib/wallet";
 
 const ShellScene = dynamic(() => import("./ShellScene"), { ssr: false });
 
@@ -83,7 +83,7 @@ export function InviteTable() {
   const [fastContract, setFastContract] = useState("");
   const [failedBatchClaim, setFailedBatchClaim] = useState("");
   const fast = !!INVITE_ADDRESS && same(fastContract, INVITE_ADDRESS);
-  const { account, connect, provider: walletProvider } = useWallet();
+  const { account, provider: walletProvider } = useWallet();
   const [inviteId, setInviteId] = useState(invited);
   const [invite, setInvite] = useState<InviteView | null>(null);
   const [status, setStatus] = useState("");
@@ -484,6 +484,23 @@ export function InviteTable() {
   const pendingStake = open && invite.payments.some((payment) => payment.pendingHandle !== ZeroHash);
   const settlementPending =
     !!invite && !open && !sealed && !invite.claimed && invite.payments.some((payment) => payment.due > 0n);
+  const hasWinner = !!invite && (invite.phase === 4 || invite.claimed) && invite.winner !== ZeroAddress;
+  const winnerSeat = hasWinner && same(invite.winner, invite.player0) ? "Host" : "Guest";
+  const won = hasWinner && same(account, invite.winner);
+  const resultTitle = hasWinner
+    ? won
+      ? "You won"
+      : `${winnerSeat} wins`
+    : invite?.phase === 4
+      ? "Draw"
+      : invite?.phase === 3
+        ? "Table refunded"
+        : "Match complete";
+  const resultDetail = hasWinner
+    ? `${winnerSeat} ${short(invite.winner)} · ${invite.claimed ? "Prize paid" : "Payout pending"}`
+    : invite?.claimed
+      ? "Any funded stakes were returned."
+      : "Refunds pending.";
   const guidance = !INVITE_ADDRESS
     ? "This invite points to an unsupported contract."
     : !account
@@ -501,7 +518,7 @@ export function InviteTable() {
                 : myCommitted
                   ? "Waiting for the other player to confirm their stake."
                   : canCommit
-                    ? "Your three hands are complete. Confirm a 1 test-token stake to lock in your score."
+                    ? "Stake 1 test token to submit your encrypted score. Both players must confirm before the result is revealed."
                     : waiting && !seated
                       ? "An open seat is available at this table."
                       : "Pick a shell in each of three hands. Your score stays encrypted.";
@@ -590,6 +607,12 @@ export function InviteTable() {
               );
             })}
           </div>
+          {invite && !legacy && (invite.claimed || settlementPending) && (
+            <div className="table-result" data-paid={invite.claimed} role="status">
+              <strong>{resultTitle}</strong>
+              <span>{resultDetail}</span>
+            </div>
+          )}
           <p role="status" className={`table-msg ${error ? "bad" : "info"}`}>
             {error ||
               readError ||
@@ -603,11 +626,7 @@ export function InviteTable() {
                 : guidance)}
           </p>
           <div className="table-controls">
-            {!account && (
-              <button type="button" onClick={connect}>
-                Connect wallet
-              </button>
-            )}
+            {!account && <TableWalletConnect />}
             {canStartFast && !picking && (
               <button type="button" disabled={busy} onClick={startRound}>
                 {invite ? "Join and play hand 1" : "Open and play hand 1"}
@@ -692,7 +711,11 @@ export function InviteTable() {
                     disabled={!account || busy}
                     onClick={() => void settlePayment(slot, payment.pendingHandle)}
                   >
-                    {pending ? "Confirm" : "Send"} seat {slot + 1} {open ? "stake" : "payout"}
+                    {open
+                      ? `Confirm ${slot === 0 ? "host" : "guest"} stake`
+                      : pending
+                        ? `Confirm ${slot === 0 ? "host" : "guest"} payout`
+                        : `Send ${slot === 0 ? "host" : "guest"} payout`}
                   </button>
                 );
               })}
@@ -718,16 +741,8 @@ export function InviteTable() {
               </button>
             </div>
           )}
-          {invite?.claimed && (
-            <p className="table-msg good">
-              {legacy
-                ? "Original claim recorded. Check the transfer on Sepolia."
-                : invite.winner === ZeroAddress
-                  ? "Any funded stakes were returned."
-                  : same(account, invite.winner)
-                    ? "You won. The prize was paid."
-                    : `Prize paid to ${short(invite.winner)}.`}
-            </p>
+          {invite?.claimed && legacy && (
+            <p className="table-msg good">Original claim recorded. Check the transfer on Sepolia.</p>
           )}
         </aside>
       </div>

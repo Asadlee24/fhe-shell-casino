@@ -24,12 +24,14 @@ const projectId = process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID?.trim();
 const config = createConfig({
   chains: [sepolia],
   connectors: connectorsForWallets(
-    [{
-      groupName: "Wallets",
-      wallets: projectId
-        ? [rainbowWallet, metaMaskWallet, rabbyWallet, walletConnectWallet, injectedWallet]
-        : [injectedWallet],
-    }],
+    [
+      {
+        groupName: "Wallets",
+        wallets: projectId
+          ? [rainbowWallet, metaMaskWallet, rabbyWallet, walletConnectWallet, injectedWallet]
+          : [injectedWallet],
+      },
+    ],
     { appName: "Shell Table", projectId: projectId ?? "" },
   ),
   transports: { [sepolia.id]: http(SEPOLIA_RPC_URL) },
@@ -39,7 +41,12 @@ const config = createConfig({
 const theme = darkTheme({ accentColor: "#e8c58b", accentColorForeground: "#111514", borderRadius: "medium" });
 
 type Connector = NonNullable<ReturnType<typeof useAccount>["connector"]>;
-type Wallet = { account: string; provider?: EthereumProvider; connect: () => void; error: string };
+type Wallet = {
+  account: string;
+  provider?: EthereumProvider;
+  connect: () => void;
+  error: string;
+};
 const WalletContext = createContext<Wallet | null>(null);
 
 export function WalletProvider({ children }: { children: ReactNode }) {
@@ -76,16 +83,17 @@ function WalletConnection({ children }: { children: ReactNode }) {
         },
       );
     }
-    return () => { current = false; };
+    return () => {
+      current = false;
+    };
   }, [connector, isConnected]);
 
-  const provider = isConnected && connection?.connector === connector && chainId === sepolia.id
-    ? connection?.provider
-    : undefined;
+  const provider =
+    isConnected && connection?.connector === connector && chainId === sepolia.id ? connection?.provider : undefined;
 
   return (
     <WalletContext.Provider
-      value={{ account: provider ? address ?? "" : "", provider, connect: () => openConnectModal?.(), error }}
+      value={{ account: provider ? (address ?? "") : "", provider, connect: () => openConnectModal?.(), error }}
     >
       {children}
     </WalletContext.Provider>
@@ -103,7 +111,69 @@ export function WalletButton() {
   return (
     <div className="wallet-slot">
       <ConnectButton label="Connect wallet" accountStatus="address" chainStatus="none" showBalance={false} />
-      {error && <span className="wallet-error" role="alert">{error}</span>}
+      {error && (
+        <span className="wallet-error" role="alert">
+          {error}
+        </span>
+      )}
     </div>
+  );
+}
+
+export function TableWalletConnect() {
+  const { error } = useWallet();
+  const [walletUrl, setWalletUrl] = useState("");
+  const [showWalletHelp, setShowWalletHelp] = useState(false);
+  const [needsWalletBrowser, setNeedsWalletBrowser] = useState(false);
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const needsBrowser = !projectId && matchMedia("(pointer: coarse)").matches && !window.ethereum;
+    setNeedsWalletBrowser(needsBrowser);
+    setShowWalletHelp(needsBrowser);
+    setWalletUrl(`https://metamask.app.link/dapp/${url.host}${url.pathname}${url.search}`);
+  }, []);
+
+  return (
+    <ConnectButton.Custom>
+      {({ account, chain, mounted, openConnectModal, openChainModal, openAccountModal }) => {
+        const wrongNetwork = account && chain?.id !== sepolia.id;
+        const waiting = account && !wrongNetwork && !error;
+        return (
+          <>
+            <button
+              type="button"
+              disabled={!mounted || !!waiting}
+              onClick={() => {
+                if (wrongNetwork) openChainModal();
+                else if (account) openAccountModal();
+                else {
+                  if (!needsWalletBrowser) openConnectModal?.();
+                  if (!projectId) setShowWalletHelp(true);
+                }
+              }}
+            >
+              {!mounted
+                ? "Loading wallet…"
+                : wrongNetwork
+                  ? "Switch to Sepolia"
+                  : account
+                    ? error
+                      ? "Manage wallet"
+                      : "Connecting…"
+                    : "Connect wallet"}
+            </button>
+            {!projectId && !account && (
+              <details open={showWalletHelp} onToggle={(event) => setShowWalletHelp(event.currentTarget.open)}>
+                <summary>Connecting from a phone?</summary>
+                <p>Open this table in a wallet app’s browser. Use Sepolia and test tokens.</p>
+                {walletUrl && <a href={walletUrl}>Open in MetaMask ↗</a>}
+              </details>
+            )}
+            {error && <p role="alert">{error}</p>}
+          </>
+        );
+      }}
+    </ConnectButton.Custom>
   );
 }
