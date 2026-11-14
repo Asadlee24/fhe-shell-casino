@@ -1,5 +1,7 @@
 # fhe-shell-casino
 
+[Play Shell Table on Sepolia](https://mystery-shell-table.vercel.app/play)
+
 A provably-fair **shell game** on Zama's fhEVM (Fully Homomorphic Encryption on Ethereum). Two players each play **three
 free hands**, then pay **$1 to commit** their hidden score. The higher encrypted total takes the **$2 pot** — and
 neither player's score is ever revealed on-chain.
