@@ -103,13 +103,31 @@ contract MysteryBoxShowdown is ZamaEthereumConfig {
         modulus = ROLL_MODULUS;
     }
 
-    function getRound(uint256 roundId)
+    function getRound(
+        uint256 roundId
+    )
         external
         view
-        returns (address host, Phase phase, uint8 paymentKind, uint256 pot, uint256 playerCount, address winner, bool claimed)
+        returns (
+            address host,
+            Phase phase,
+            uint8 paymentKind,
+            uint256 pot,
+            uint256 playerCount,
+            address winner,
+            bool claimed
+        )
     {
         Round storage round = _rounds[roundId];
-        return (round.host, round.phase, round.paymentKind, round.pot, _players[roundId].length, round.winner, round.claimed);
+        return (
+            round.host,
+            round.phase,
+            round.paymentKind,
+            round.pot,
+            _players[roundId].length,
+            round.winner,
+            round.claimed
+        );
     }
 
     function getPlayers(uint256 roundId) external view returns (address[] memory) {
@@ -285,7 +303,12 @@ contract MysteryBoxShowdown is ZamaEthereumConfig {
 
     function _pullUnderlying(address from, uint256 amount) internal {
         (bool success, bytes memory data) = underlyingToken.call(
-            abi.encodeWithSelector(bytes4(keccak256("transferFrom(address,address,uint256)")), from, address(this), amount)
+            abi.encodeWithSelector(
+                bytes4(keccak256("transferFrom(address,address,uint256)")),
+                from,
+                address(this),
+                amount
+            )
         );
         if (!success || (data.length != 0 && !abi.decode(data, (bool)))) revert FallbackPaymentFailed();
     }

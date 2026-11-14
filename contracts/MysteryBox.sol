@@ -46,12 +46,7 @@ contract MysteryBox is ZamaEthereumConfig {
     function getOdds()
         external
         pure
-        returns (
-            string[4] memory names,
-            uint256[4] memory percent,
-            uint256[4] memory bucketWeight,
-            uint256 modulus
-        )
+        returns (string[4] memory names, uint256[4] memory percent, uint256[4] memory bucketWeight, uint256 modulus)
     {
         names = ["Common", "Rare", "Epic", "Legendary"];
         percent = [uint256(60), 25, 12, 3];
@@ -89,7 +84,12 @@ contract MysteryBox is ZamaEthereumConfig {
 
     function _pullUnderlying(address from, uint256 amount) internal {
         (bool success, bytes memory data) = underlyingToken.call(
-            abi.encodeWithSelector(bytes4(keccak256("transferFrom(address,address,uint256)")), from, address(this), amount)
+            abi.encodeWithSelector(
+                bytes4(keccak256("transferFrom(address,address,uint256)")),
+                from,
+                address(this),
+                amount
+            )
         );
         if (!success || (data.length != 0 && !abi.decode(data, (bool)))) revert FallbackPaymentFailed();
     }
