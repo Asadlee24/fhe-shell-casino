@@ -16,7 +16,10 @@ function powerFromRoll(roll: bigint) {
 async function deployFixture() {
   const erc = await ethers.deployContract("MockERC20");
   const cusdt = await ethers.deployContract("MockCUSDT");
-  const showdown = await ethers.deployContract("MysteryBoxShowdown", [await cusdt.getAddress(), await erc.getAddress()]);
+  const showdown = await ethers.deployContract("MysteryBoxShowdown", [
+    await cusdt.getAddress(),
+    await erc.getAddress(),
+  ]);
   return { showdown, erc, cusdt, address: await showdown.getAddress() };
 }
 
@@ -76,14 +79,15 @@ describe("MysteryBoxShowdown", function () {
 
     const alicePower = await readPower(alice, roundId);
     const bobPower = await readPower(bob, roundId);
-    await expect(fhevm.userDecryptEuint(FhevmType.euint32, await showdown.getPlayerBox(alice.address, roundId), address, bob))
-      .to.be.rejected;
+    await expect(
+      fhevm.userDecryptEuint(FhevmType.euint32, await showdown.getPlayerBox(alice.address, roundId), address, bob),
+    ).to.be.rejected;
 
     await (await showdown.resolve(roundId)).wait();
     const winnerHandle = await showdown.getWinnerHandle(roundId);
     const revealed = await fhevm.publicDecrypt([winnerHandle]);
     const expected = alicePower > bobPower ? alice.address : alicePower < bobPower ? bob.address : alice.address;
-    expect(revealed.clearValues[winnerHandle]).to.eq(expected);
+    expect(revealed.clearValues[winnerHandle as `0x${string}`]).to.eq(expected);
 
     const claimTx = await showdown.claim(roundId, revealed.abiEncodedClearValues, revealed.decryptionProof);
     await claimTx.wait();
@@ -105,7 +109,7 @@ describe("MysteryBoxShowdown", function () {
 
     const winnerHandle = await showdown.getWinnerHandle(roundId);
     const revealed = await fhevm.publicDecrypt([winnerHandle]);
-    expect(revealed.clearValues[winnerHandle]).to.eq(alice.address);
+    expect(revealed.clearValues[winnerHandle as `0x${string}`]).to.eq(alice.address);
     await (await showdown.claim(roundId, revealed.abiEncodedClearValues, revealed.decryptionProof)).wait();
     expect((await showdown.getRound(roundId)).winner).to.eq(alice.address);
     expect(await erc.balanceOf(alice.address)).to.eq(FEE * 3n);

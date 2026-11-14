@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { useMemo, type ReactNode } from "react";
 import { IndexedDBStorage, indexedDBStorage } from "@zama-fhe/sdk";
 import { sepolia as fheSepolia } from "@zama-fhe/sdk/chains";
 import { createConfig } from "@zama-fhe/sdk/ethers";
@@ -13,7 +12,6 @@ import { SEPOLIA_RPC_URL } from "@/lib/config";
 import { useWallet } from "@/lib/wallet";
 
 const permitDBStorage = new IndexedDBStorage("PermitStore");
-const queryClient = new QueryClient();
 
 const relayerProxyUrl =
   typeof window === "undefined" ? "http://localhost/api/relayer" : `${window.location.origin}/api/relayer`;
@@ -30,38 +28,6 @@ const fallbackProvider = {
 
 export function Providers({ children }: { children: ReactNode }) {
   const { provider, account } = useWallet();
-  const liveAccountsRef = useRef<string[]>([]);
-  const refSeededRef = useRef(false);
-  const [walletKey, setWalletKey] = useState(0);
-
-  useEffect(() => {
-    const ethereum = provider;
-    if (!ethereum?.on || !ethereum.removeListener) return;
-    (ethereum.request({ method: "eth_accounts" }) as Promise<string[]>).then(
-      (accounts) => {
-        liveAccountsRef.current = accounts;
-        refSeededRef.current = true;
-      },
-      () => {
-        refSeededRef.current = true;
-      },
-    );
-    const handleAccountsChanged = (accounts: unknown) => {
-      const next = accounts as string[];
-      const prev = liveAccountsRef.current[0];
-      liveAccountsRef.current = next;
-      if (!refSeededRef.current) return;
-      if (next[0] !== prev) setWalletKey((k) => k + 1);
-    };
-    const handleChainChanged = () => setWalletKey((k) => k + 1);
-    ethereum.on("accountsChanged", handleAccountsChanged);
-    ethereum.on("chainChanged", handleChainChanged);
-    return () => {
-      ethereum.removeListener?.("accountsChanged", handleAccountsChanged);
-      ethereum.removeListener?.("chainChanged", handleChainChanged);
-    };
-  }, [provider]);
-
   const zamaConfig = useMemo(() => {
     const ethereum = (provider ?? fallbackProvider) as EIP1193Provider;
     const rpc = new JsonRpcProvider(SEPOLIA_RPC_URL);
@@ -78,13 +44,7 @@ export function Providers({ children }: { children: ReactNode }) {
       permitStorage: permitDBStorage,
       relayers: { [chain.id]: web() },
     });
-  }, [provider, account, walletKey]);
+  }, [provider, account]);
 
-  return (
-    <QueryClientProvider client={queryClient}>
-      <ZamaProvider config={zamaConfig} key={`${account}:${walletKey}`}>
-        {children}
-      </ZamaProvider>
-    </QueryClientProvider>
-  );
+  return <ZamaProvider config={zamaConfig} key={account}>{children}</ZamaProvider>;
 }

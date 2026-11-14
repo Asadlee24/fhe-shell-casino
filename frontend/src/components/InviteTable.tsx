@@ -1,15 +1,19 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import dynamic from "next/dynamic";
+import { useShellSound } from "@/lib/useShellSound";
 import { useSearchParams } from "next/navigation";
-import { BrowserProvider, Contract, JsonRpcProvider } from "ethers";
-import { useDecryptPublicValues, useDecryptValues, useEncrypt, useGrantPermit, useHasPermit, useShield } from "@zama-fhe/react-sdk";
+import { BrowserProvider, Contract, JsonRpcProvider, ZeroAddress, ZeroHash } from "ethers";
+import { useDecryptPublicValues, useDecryptValues, useGrantPermit, useHasPermit, useShield } from "@zama-fhe/react-sdk";
 import { cusdtAbi, erc20Abi } from "@/lib/abi";
 import {
   BOX_PRICE,
   CUSDT,
-  INVITE_ADDRESS,
+  INVITE_ADDRESS as UPDATED_ADDRESS,
+  LEGACY_INVITE_ADDRESS,
+  SEPOLIA_CHAIN_ID_HEX,
   SEPOLIA_RPC_URL,
   UNDERLYING,
   addressUrl,
@@ -18,13 +22,19 @@ import {
 import { inviteAbi } from "@/lib/inviteAbi";
 import { useWallet } from "@/lib/wallet";
 
+const ShellScene = dynamic(() => import("./ShellScene"), { ssr: false });
+
 const HANDS = 3;
+const SLOTS = [0, 1] as const;
+type Payment = { funded: bigint; due: bigint; pendingHandle: `0x${string}` };
 
 type InviteView = {
   host: string;
   deadline: number;
   phase: number;
   pot: bigint;
+  paymentKind: number;
+  payments: Payment[];
   player0: string;
   player1: string;
   winner: string;
@@ -57,19 +67,26 @@ function timeLeft(deadline: number, now: number) {
 export function InviteTable() {
   const params = useSearchParams();
   const invited = params.get("invite") ?? "";
+  const requested = params.get("contract") ?? "";
+  const legacy = !!invited && (!requested || same(requested, LEGACY_INVITE_ADDRESS));
+  const INVITE_ADDRESS = (
+    legacy ? LEGACY_INVITE_ADDRESS : !requested || same(requested, UPDATED_ADDRESS) ? UPDATED_ADDRESS : ""
+  ) as `0x${string}`;
   const { account, provider: walletProvider } = useWallet();
   const [inviteId, setInviteId] = useState(invited);
   const [invite, setInvite] = useState<InviteView | null>(null);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+  const [readError, setReadError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [fallback, setFallback] = useState(false);
   const [copied, setCopied] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [picking, setPicking] = useState(false);
   const [chosen, setChosen] = useState<number | null>(null);
   const [wantBall, setWantBall] = useState(false);
-  const encrypt = useEncrypt();
+  const { muted, toggleSound, playSound } = useShellSound();
+  const heardBall = useRef("");
+  const paidResult = useRef<{ id: string; paid: boolean } | null>(null);
   const shield = useShield({ address: CUSDT });
   const publicDecrypt = useDecryptPublicValues();
   const { mutateAsync: grantPermit } = useGrantPermit();
@@ -84,8 +101,8 @@ export function InviteTable() {
 
   const link = useMemo(() => {
     if (!inviteId || typeof window === "undefined") return "";
-    return `${window.location.origin}/play?invite=${inviteId}`;
-  }, [inviteId]);
+    return `${window.location.origin}/play?invite=${inviteId}&contract=${INVITE_ADDRESS}`;
+  }, [inviteId, INVITE_ADDRESS]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);
@@ -95,41 +112,58 @@ export function InviteTable() {
   useEffect(() => {
     if (!invited) return;
     setInviteId(invited);
-    void refresh(invited);
-    const timer = window.setInterval(() => void refresh(invited), 12_000);
+    const poll = () =>
+      void refresh(invited).then(
+        () => setReadError(""),
+        () => setReadError("Could not refresh this table. Retrying…"),
+      );
+    poll();
+    const timer = window.setInterval(poll, 8_000);
     return () => window.clearInterval(timer);
-  }, [invited, account]);
+  }, [invited, account, INVITE_ADDRESS]);
 
   function reader() {
-    return new Contract(INVITE_ADDRESS, inviteAbi, new JsonRpcProvider(SEPOLIA_RPC_URL));
+    return new Contract(
+      INVITE_ADDRESS,
+      inviteAbi,
+      new JsonRpcProvider(SEPOLIA_RPC_URL, 11155111, { staticNetwork: true, cacheTimeout: -1 }),
+    );
   }
 
   async function signer() {
     const ethereum = walletProvider;
-    if (!ethereum) throw new Error("Connect a wallet on Sepolia.");
-    return new BrowserProvider(ethereum).getSigner();
+    if (!ethereum || (await ethereum.request({ method: "eth_chainId" })) !== SEPOLIA_CHAIN_ID_HEX) {
+      throw new Error("Connect a wallet on Sepolia.");
+    }
+    return new BrowserProvider(ethereum).getSigner(account);
   }
 
   async function refresh(id = inviteId) {
-    if (!INVITE_ADDRESS || !id) return;
+    if (!INVITE_ADDRESS || !/^[1-9]\d{0,77}$/.test(id) || BigInt(id) >= 1n << 256n) return;
     const box = reader();
-    const snap = await box.getInvite(id);
-    if (snap.host === "0x0000000000000000000000000000000000000000") {
+    const blockTag = await box.runner!.provider!.getBlockNumber();
+    const [snap, seats, hands, committed, payments] = await Promise.all([
+      box.getInvite(id, { blockTag }),
+      box.getSeats(id, { blockTag }),
+      box.getHands(id, { blockTag }),
+      box.getCommitted(id, { blockTag }),
+      legacy ? [] : Promise.all(SLOTS.map((slot) => box.getPayment(id, slot, { blockTag }))),
+    ]);
+    if (snap.host === ZeroAddress) {
       setInvite(null);
-      setError("This invite link is not an open table.");
+      setError("This invite link does not match a table.");
       return;
     }
-    const seats = await box.getSeats(id);
-    const hands = await box.getHands(id);
-    const committed = await box.getCommitted(id);
     const mine = same(account, seats.player0) ? 0 : same(account, seats.player1) ? 1 : -1;
     const iPlayed = mine === 0 ? hands.hostHands > 0 : mine === 1 ? hands.guestHands > 0 : false;
-    const ballHandle = iPlayed ? ((await box.getBallHandle(id, mine)) as string) : `0x${"0".repeat(64)}`;
+    const ballHandle = iPlayed ? ((await box.getBallHandle(id, mine, { blockTag })) as string) : `0x${"0".repeat(64)}`;
     setInvite({
       host: snap.host,
       deadline: Number(snap.deadline),
       phase: Number(snap.phase),
       pot: snap.pot,
+      paymentKind: Number(snap.paymentKind),
+      payments,
       player0: seats.player0,
       player1: seats.player1,
       winner: snap.winner,
@@ -155,24 +189,11 @@ export function InviteTable() {
     await ensureClear();
     setStatus("Shielding $1 into cUSDT…");
     await shield.mutateAsync({ amount: BOX_PRICE });
-    const wallet = await signer();
-    const token = new Contract(CUSDT, cusdtAbi, wallet);
-    if (!(await token.isOperator(account, INVITE_ADDRESS))) {
-      setStatus("Approving the invite contract as a cUSDT operator…");
-      const until = Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 30;
-      await (await token.setOperator(INVITE_ADDRESS, until)).wait();
-    }
-    setStatus("Encrypting the $1 stake…");
-    return encrypt.mutateAsync({
-      values: [{ value: BOX_PRICE, type: "euint64" }],
-      contractAddress: INVITE_ADDRESS,
-      userAddress: account as `0x${string}`,
-    });
   }
 
   function remember(id: string) {
     setInviteId(id);
-    const next = `/play?invite=${id}`;
+    const next = `/play?invite=${id}&contract=${INVITE_ADDRESS}`;
     window.history.replaceState(null, "", next);
   }
 
@@ -215,17 +236,19 @@ export function InviteTable() {
   async function commitConfidential() {
     setBusy(true);
     setError("");
-    setFallback(false);
     try {
-      const encrypted = await payConfidential();
+      const token = new Contract(CUSDT, cusdtAbi, await signer());
+      if (!(await token.isOperator(account, INVITE_ADDRESS))) {
+        const until = Math.floor(Date.now() / 1000) + 15 * 60;
+        await (await token.setOperator(INVITE_ADDRESS, until)).wait();
+      }
       setStatus("Paying $1 and committing your score…");
       const box = new Contract(INVITE_ADDRESS, inviteAbi, await signer());
-      await (await box.commit(inviteId, encrypted.encryptedValues[0], encrypted.inputProof)).wait();
-      setStatus("Score committed. The other player commits to resolve the round.");
+      await (await box.commit(inviteId)).wait();
+      setStatus("Stake submitted. Follow the table status below.");
       await refresh();
     } catch (err) {
       setError(`cUSDT stake failed: ${explainChainError(err)}`);
-      setFallback(true);
       setStatus("");
     } finally {
       setBusy(false);
@@ -246,8 +269,7 @@ export function InviteTable() {
       setStatus("Fallback Payment: committing your score…");
       const box = new Contract(INVITE_ADDRESS, inviteAbi, wallet);
       await (await box.commitFallback(inviteId)).wait();
-      setFallback(false);
-      setStatus("Score committed. The other player commits to resolve the round.");
+      setStatus("Stake submitted. Follow the table status below.");
       await refresh();
     } catch (err) {
       setError(`Fallback Payment failed: ${explainChainError(err)}`);
@@ -258,17 +280,15 @@ export function InviteTable() {
   }
 
   function startRound() {
+    playSound("shuffle", true);
     setChosen(null);
     setWantBall(false);
-    setPicking(false);
-    setStatus("Shuffling the cups…");
-    window.setTimeout(() => {
-      setPicking(true);
-      setStatus(`Hand ${myHands + 1} of ${HANDS} — pick a cup. Playing is free.`);
-    }, 900);
+    setPicking(true);
+    setStatus(`Hand ${myHands + 1} of ${HANDS}. Pick a shell.`);
   }
 
   async function playCup(cup: number) {
+    playSound("pick", true);
     setBusy(true);
     setError("");
     setChosen(cup);
@@ -276,14 +296,15 @@ export function InviteTable() {
       setStatus("Sealing your hand…");
       const box = new Contract(INVITE_ADDRESS, inviteAbi, await signer());
       await (await box.play(inviteId, cup)).wait();
+      setPicking(false);
+      await refresh();
       if (!hasPermit) {
         setStatus("Sign the permit to see your own cup…");
         await grantPermit([INVITE_ADDRESS]);
       }
       setWantBall(true);
       setPicking(false);
-      setStatus(myHands + 1 >= HANDS ? "Three hands played. Pay $1 to commit your score." : "Hand sealed. Play the next one.");
-      await refresh();
+      setStatus("");
     } catch (err) {
       setError(explainChainError(err));
       setStatus("");
@@ -301,11 +322,31 @@ export function InviteTable() {
       const revealed = await publicDecrypt.mutateAsync([invite.winnerHandle as `0x${string}`]);
       const box = new Contract(INVITE_ADDRESS, inviteAbi, await signer());
       await (await box.claim(inviteId, revealed.abiEncodedClearValues, revealed.decryptionProof)).wait();
-      setStatus("The $2 prize is paid. Neither score was revealed.");
+      setStatus("");
       await refresh();
     } catch (err) {
       setError(explainChainError(err));
       setStatus("");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function settlePayment(slot: number, pendingHandle?: `0x${string}`) {
+    setBusy(true);
+    setError("");
+    try {
+      const box = new Contract(INVITE_ADDRESS, inviteAbi, await signer());
+      if (pendingHandle && pendingHandle !== ZeroHash) {
+        const proof = await publicDecrypt.mutateAsync([pendingHandle]);
+        await (await box.confirmTransfer(inviteId, slot, proof.abiEncodedClearValues, proof.decryptionProof)).wait();
+      } else {
+        await (await box.paySeat(inviteId, slot)).wait();
+      }
+      setStatus("");
+      await refresh();
+    } catch (err) {
+      setError(explainChainError(err));
     } finally {
       setBusy(false);
     }
@@ -318,7 +359,7 @@ export function InviteTable() {
       setStatus("Returning the committed stake…");
       const box = new Contract(INVITE_ADDRESS, inviteAbi, await signer());
       await (await box.refundExpired(inviteId)).wait();
-      setStatus("The committed stake is back.");
+      setStatus("");
       await refresh();
     } catch (err) {
       setError(explainChainError(err));
@@ -330,53 +371,54 @@ export function InviteTable() {
 
   const mySlot = invite && same(account, invite.player0) ? 0 : invite && same(account, invite.player1) ? 1 : -1;
   const seated = mySlot >= 0;
-  const myHands = mySlot === 0 ? invite?.hostHands ?? 0 : mySlot === 1 ? invite?.guestHands ?? 0 : 0;
+  const myHands = mySlot === 0 ? (invite?.hostHands ?? 0) : mySlot === 1 ? (invite?.guestHands ?? 0) : 0;
   const myCommitted = mySlot === 0 ? !!invite?.hostCommitted : mySlot === 1 ? !!invite?.guestCommitted : false;
   const otherCommitted = mySlot === 0 ? !!invite?.guestCommitted : mySlot === 1 ? !!invite?.hostCommitted : false;
   const open = invite?.phase === 1;
   const expired = open && invite.deadline * 1000 <= now;
   const waiting = open && !expired && invite.player1 === "0x0000000000000000000000000000000000000000";
   const sealed = invite?.phase === 2 && !invite.claimed;
-  const canPlay = seated && open && !expired && myHands < HANDS;
-  const canCommit = seated && open && !expired && myHands >= HANDS && !myCommitted;
+  const canPlay = !legacy && seated && open && !expired && myHands < HANDS;
+  const ownPayment = mySlot < 0 ? undefined : invite?.payments[mySlot];
+  const canCommit =
+    !legacy &&
+    seated &&
+    open &&
+    !expired &&
+    myHands >= HANDS &&
+    !myCommitted &&
+    (!ownPayment || ownPayment.pendingHandle === ZeroHash);
   const myBall = ballReady ? Number(ballDecrypt.data?.[invite.ballHandle as `0x${string}`]) : NaN;
-  const ballKnown = Number.isInteger(myBall);
+  const ballKnown = wantBall && Number.isInteger(myBall);
+  useEffect(() => {
+    if (!ballKnown || !invite || myBall > 2 || heardBall.current === invite.ballHandle) return;
+    heardBall.current = invite.ballHandle;
+    playSound(myBall === chosen ? "hit" : "reveal");
+  }, [ballKnown, invite, myBall, chosen, playSound]);
+
+  useEffect(() => {
+    if (!invite || legacy || !account) return;
+    const id = `${INVITE_ADDRESS}:${inviteId}:${account}`;
+    const previous = paidResult.current;
+    paidResult.current = { id, paid: invite.claimed };
+    if (previous?.id === id && !previous.paid && invite.claimed && same(account, invite.winner)) playSound("win");
+  }, [account, invite, inviteId, legacy, INVITE_ADDRESS, playSound]);
 
   return (
     <main className="table-room">
-      <div className="curtain left" />
-      <div className="curtain right" />
-      <div className="bulbs" aria-hidden="true">
-        {Array.from({ length: 12 }, (_, index) => (
-          <i key={index} />
-        ))}
-      </div>
       <header className="marquee">
-        <div className="over">★ ★ ★ TWO SEATS ★ ★ ★</div>
-        <h1>Shell table</h1>
-        <p>Play three free hands. Pay $1 to commit your score. The higher hidden total takes $2.</p>
+        <h1>Shell Table</h1>
+        <p>Two players. Three picks each.</p>
       </header>
-      <div className="hud">
-        <div className="chip-stat">
-          <b>$1</b>
-          <span>EACH STAKE</span>
-        </div>
-        <div className="chip-stat">
-          <b>$2</b>
-          <span>WINNER PRIZE</span>
-        </div>
-        <div className="chip-stat">
-          <b>3</b>
-          <span>FREE HANDS</span>
-        </div>
-        <div className="chip-stat">
-          <b>48h</b>
-          <span>LINK STAYS OPEN</span>
-        </div>
-      </div>
       <div className="felt-wrap">
         <div className="felt">
-          <div className="felt-logo">♦ PICK A CUP ♦</div>
+          <ShellScene picking={picking} revealed={ballKnown ? myBall : -1} />
+          <div className="table-rail">
+            <span>{invite ? `Table ${inviteId}` : "Sepolia testnet"}</span>
+            <button className="sound-toggle" type="button" aria-pressed={!muted} onClick={toggleSound}>
+              Sound {muted ? "off" : "on"}
+            </button>
+          </div>
           <div className={`cups ${picking ? "picking" : ""}`}>
             {[0, 1, 2].map((cup) => (
               <button
@@ -384,10 +426,14 @@ export function InviteTable() {
                 type="button"
                 className={`cup ${ballKnown && myBall === cup ? "lift" : ""} ${chosen === cup ? "chosen" : ""}`}
                 aria-label={`Cup ${cup + 1}`}
-                disabled={!picking || busy}
+                disabled={!canPlay || !picking || busy}
                 onClick={() => void playCup(cup)}
               >
-                <span className={`ball ${ballKnown && myBall === cup ? "show" : ""}`} />
+                <span className="cup-object" aria-hidden="true" />
+                <span className={`ball ${ballKnown && myBall === cup ? "show" : ""}`} aria-hidden="true" />
+                <span className="cup-index" aria-hidden="true">
+                  {cup + 1}
+                </span>
               </button>
             ))}
           </div>
@@ -395,13 +441,16 @@ export function InviteTable() {
       </div>
       <p className={`table-msg ${error ? "bad" : "info"}`}>
         {error ||
+          readError ||
           status ||
           (ballKnown
-            ? chosen !== null && myBall === chosen
-              ? "The ball was under the cup you picked. Your score stays encrypted."
-              : chosen !== null
-                ? "The ball was under a different cup. Your score stays encrypted."
-                : "Your cup is revealed. Your score stays encrypted."
+            ? myBall === 3
+              ? "Draw void. Both stakes are returned at settlement."
+              : chosen !== null && myBall === chosen
+                ? "The ball was under the cup you picked. Your score stays encrypted."
+                : chosen !== null
+                  ? "The ball was under a different cup. Your score stays encrypted."
+                  : "Your cup is revealed. Your score stays encrypted."
             : "Play your three hands free. The other player does not have to be here.")}
       </p>
       <div className="table-controls">
@@ -410,7 +459,7 @@ export function InviteTable() {
             Open a table
           </button>
         )}
-        {waiting && !seated && (
+        {!legacy && waiting && !seated && (
           <button type="button" disabled={!account || busy} onClick={() => void joinTable()}>
             Take the open seat
           </button>
@@ -420,28 +469,66 @@ export function InviteTable() {
             Play hand {myHands + 1} of {HANDS}
           </button>
         )}
-        {canCommit && (
+        {canCommit && invite?.paymentKind !== 2 && (
           <button type="button" disabled={!account || busy} onClick={() => void commitConfidential()}>
-            Pay $1 and commit score
+            Stake cUSDT test token
           </button>
         )}
-        {myCommitted && open && !otherCommitted && <span className="fast-badge">Score committed. The other player commits to resolve.</span>}
+        {canCommit && invite?.paymentKind !== 2 && (
+          <button
+            type="button"
+            className="ghost"
+            disabled={busy}
+            onClick={() => {
+              setBusy(true);
+              void payConfidential()
+                .then(() => setStatus("Test tokens ready."))
+                .catch((err) => setError(explainChainError(err)))
+                .finally(() => setBusy(false));
+            }}
+          >
+            Get cUSDT test tokens
+          </button>
+        )}
+        {myCommitted && open && !otherCommitted && (
+          <span className="fast-badge">Score committed. The other player commits to resolve.</span>
+        )}
         {sealed && (
           <button type="button" disabled={!account || busy} onClick={() => void claim()}>
-            Pay the $2 prize
+            {legacy ? "Submit original prize claim" : "Verify match result"}
           </button>
         )}
-        {expired && (
+        {expired && invite.payments.every((payment) => payment.pendingHandle === ZeroHash) && (
           <button type="button" disabled={!account || busy} onClick={() => void refund()}>
             Refund the committed stake
           </button>
         )}
-        {fallback && (
+        {canCommit && invite?.paymentKind !== 1 && (
           <button type="button" className="ghost" disabled={!account || busy} onClick={() => void commitClear()}>
-            Fallback Payment
+            Stake clear test token
           </button>
         )}
       </div>
+      {invite && !legacy && (
+        <div className="table-controls">
+          {invite.payments.map((payment, slot) => {
+            const pending = payment.pendingHandle !== ZeroHash;
+            if (open && !pending) return null;
+            if (!open && payment.due === 0n) return null;
+            return (
+              <button
+                key={slot}
+                type="button"
+                disabled={!account || busy}
+                onClick={() => void settlePayment(slot, payment.pendingHandle)}
+              >
+                {pending ? "Confirm" : "Send"} seat {slot + 1} {open ? "stake" : "payout"}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {!INVITE_ADDRESS && <p className="seat-line">Set the updated Sepolia contract address to open new tables.</p>}
       {link && invite && (
         <div className="invite-link">
           <span>Invitation link</span>
@@ -450,8 +537,10 @@ export function InviteTable() {
             type="button"
             className="ghost"
             onClick={() => {
-              void navigator.clipboard.writeText(link);
-              setCopied(true);
+              void navigator.clipboard.writeText(link).then(
+                () => setCopied(true),
+                () => setError("Copy the invitation URL from your address bar."),
+              );
             }}
           >
             {copied ? "Copied" : "Copy link"}
@@ -461,7 +550,13 @@ export function InviteTable() {
       )}
       {invite?.claimed && (
         <p className="table-msg good">
-          {same(account, invite.winner) ? "You won $2." : `The $2 prize went to ${short(invite.winner)}.`} Neither score was revealed.
+          {legacy
+            ? "Original claim recorded. Check the transfer on Sepolia."
+            : invite.winner === ZeroAddress
+              ? "Any funded stakes were returned."
+              : same(account, invite.winner)
+                ? "You won. The prize was paid."
+                : `Prize paid to ${short(invite.winner)}.`}
         </p>
       )}
       {invite && (
@@ -478,7 +573,9 @@ export function InviteTable() {
         </p>
       )}
       {!INVITE_ADDRESS && <p className="table-msg bad">The invite contract is not on Sepolia yet.</p>}
-      {!account && <p className="table-msg info">Connect a wallet on Sepolia. The other player can open the link later.</p>}
+      {!account && (
+        <p className="table-msg info">Connect a wallet on Sepolia. The other player can open the link later.</p>
+      )}
       <p className="seat-line">
         <Link href="/showdown">2–5 player showdown</Link>
       </p>
